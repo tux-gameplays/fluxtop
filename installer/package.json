@@ -1,7 +1,7 @@
 {
-  "name": "reflux-installer",
+  "name": "fluxtop-installer",
   "version": "1.0.0",
-  "description": "Installer for Reflux — Fluxer mod loader",
+  "description": "Installer for Fluxtop — Fluxer mod loader",
   "private": true,
   "main": "gui/main.js",
   "scripts": {
@@ -9,11 +9,12 @@
     "gui": "electron gui/main.js",
     "build": "node build.js"
   },
-  "reflux": {
-    "githubRepo": "its3rr0rswrld/Reflux"
+  "fluxtop": {
+    "githubRepo": "tux-gameplays/fluxtop"
   },
   "dependencies": {
-    "@electron/asar": "^3.2.13"
+    "@electron/asar": "^3.2.13",
+    "extract-zip": "^2.0.1"
   },
   "devDependencies": {
     "@yao-pkg/pkg": "latest",
@@ -21,8 +22,8 @@
     "electron-builder": "latest"
   },
   "build": {
-    "appId": "dev.reflux.installer",
-    "productName": "Reflux Installer",
+    "appId": "dev.fluxtop.installer",
+    "productName": "Fluxtop Installer",
     "copyright": "Reflux contributors",
     "directories": {
       "output": "dist"
@@ -30,6 +31,7 @@
     "asar": false,
     "files": [
       "gui/**/*",
+      "lib/**/*",
       "node_modules/**/*",
       "package.json"
     ],
@@ -37,12 +39,19 @@
       "target": [
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },
     "portable": {
-      "artifactName": "reflux-v${version}-win-x64-setup.exe"
+      "artifactName": "fluxtop-v${version}-win-x64-setup.exe"
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "artifactName": "fluxtop-v${version}-linux-x64-setup.AppImage",
+      "category": "Utility"
     }
   }
 }

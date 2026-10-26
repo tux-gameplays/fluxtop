@@ -2,7 +2,13 @@
 
 const {session} = require('electron');
 
-const FILTER = {urls: ['https://web.fluxer.app/api/v1/channels/*/typing']};
+const FILTER = {urls: ['<all_urls>']};
+const TYPING_REQUEST = /https:\/\/web(?:\.canary)?\.fluxer\.app\/api\/v1\/channels\/[^/?#]+\/typing(?:[?#]|$)/;
+
+function isTypingRequest(url) {
+	try { return TYPING_REQUEST.test(decodeURIComponent(url)); }
+	catch { return TYPING_REQUEST.test(url); }
+}
 
 let _enabled = false;
 
@@ -16,7 +22,7 @@ module.exports = {
 	start() {
 		_enabled = true;
 		session.defaultSession.webRequest.onBeforeRequest(FILTER, (details, callback) => {
-			callback({cancel: _enabled});
+			callback({cancel: _enabled && isTypingRequest(details.url)});
 		});
 	},
 

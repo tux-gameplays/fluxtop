@@ -1,7 +1,7 @@
 /**
  * src/renderer.js
  *
- * Reflux renderer bootstrap.  Injected into Fluxer's web context
+ * Fluxtop renderer bootstrap.  Injected into Fluxer's web context
  * (https://web.fluxer.app) via webContents.executeJavaScript() from
  * src/main-inject.mjs after CSP headers have been stripped.
  *
@@ -9,7 +9,7 @@
  *   1. Hook into Fluxer's webpack module system (rspack / webpack 5 chunk API)
  *      so plugins can intercept any module by its module ID or by searching
  *      its exports.
- *   2. Expose a global `window.__reflux` API that plugins (and the settings UI)
+ *   2. Expose a global `window.__fluxtop` API that plugins (and the settings UI)
  *      can use.
  *   3. Load and start all registered renderer-side plugins.
  *
@@ -26,11 +26,11 @@
  * ─────────────────────────────────────────────────────────────────────────
  */
 
-(function refluxRendererBootstrap() {
+(function fluxtopRendererBootstrap() {
   'use strict';
 
   // Guard against double injection.
-  if (window.__reflux) return;
+  if (window.__fluxtop) return;
 
   // ---------------------------------------------------------------------------
   // Mini event emitter
@@ -47,7 +47,7 @@
     },
     emit(event, ...args) {
       _listeners.get(event)?.forEach(fn => {
-        try { fn(...args); } catch (e) { console.error('[Reflux] Event handler threw:', e); }
+        try { fn(...args); } catch (e) { console.error('[Fluxtop] Event handler threw:', e); }
       });
     },
   };
@@ -66,6 +66,8 @@
 
   /** @type {Function|null}  Webpack's internal require function. */
   let _webpackRequire = null;
+  /** @type {Record<string, any>|null}  Original Rspack module cache. */
+  let _webpackCache = null;
 
   /**
    * Apply all registered patches whose filter matches `exports`.
@@ -85,10 +87,20 @@
           events.emit('module-patched', id);
         }
       } catch (err) {
-        console.error(`[Reflux:Patcher] Patch callback for module "${id}" threw:`, err);
+        console.error(`[Fluxtop:Patcher] Patch callback for module "${id}" threw:`, err);
       }
     }
     return result;
+  }
+
+  function applyPatchesToCachedModules(cache, applyPatches, onError) {
+    if (!cache || typeof cache !== 'object') return;
+    for (const id of Object.keys(cache)) {
+      const module = cache[id];
+      if (!module || module.exports === undefined) continue;
+      try { module.exports = applyPatches(module.exports, id); }
+      catch (error) { onError?.(error, id); }
+    }
   }
 
   /**
@@ -110,6 +122,7 @@
     if (wpRequire.c) {
       // webpack 5 module cache.
       const cache = wpRequire.c;
+      _webpackCache = cache;
       const handler = {
         get(target, id) {
           const mod = target[id];
@@ -131,18 +144,23 @@
   }
 
   /**
-   * Hook into the webpack chunk push API.
+   * Hook into the webpack/Rspack chunk push API.
    *
-   * The chunk array is named `webpackChunkfluxer` (derived from the `output.
-   * chunkLoadingGlobal` rspack config, which defaults to `webpackChunk` +
-   * camelCase package name).  We try multiple possible names.
+   * Fluxer builds may use `webpackChunk*` aliases or a `rspackChunk*` array.
+   * Hook the actual array instance because Rspack can retain a local reference
+   * to it instead of reading the global property again for every chunk.
    *
    * Each push call has the shape:
    *   [chunkIds, moduleMap, runtimeFn]
    * where moduleMap is `{ [moduleId]: (module, exports, require) => void }`.
    */
   function _hookChunkPush() {
-    const CHUNK_ARRAY_NAMES = ['webpackChunkfluxer', 'webpackChunk', 'webpackChunkapp'];
+    const CHUNK_ARRAY_NAMES = new Set([
+      'webpackChunkfluxer',
+      'webpackChunk',
+      'webpackChunkapp',
+      ...Object.getOwnPropertyNames(window).filter((name) => /^(?:rspack|webpack)Chunk/.test(name)),
+    ]);
 
     for (const name of CHUNK_ARRAY_NAMES) {
       _tryHookChunkArray(name);
@@ -157,7 +175,8 @@
     const _cleanup = () => { Object.defineProperty = _origDefineProperty; };
     Object.defineProperty = function(obj, prop, descriptor) {
       const result = _origDefineProperty(obj, prop, descriptor);
-      if (obj === window && !_definedArrays.has(prop) && prop.startsWith('webpackChunk')) {
+      if (obj === window && typeof prop === 'string' &&
+          !_definedArrays.has(prop) && /^(?:rspack|webpack)Chunk/.test(prop)) {
         _definedArrays.add(prop);
         _tryHookChunkArray(prop);
       }
@@ -173,28 +192,47 @@
    */
   function _tryHookChunkArray(arrayName) {
     const _chunkArray = window[arrayName];
+    if (!Array.isArray(_chunkArray)) return;
 
     // Process any chunks already loaded.
-    if (Array.isArray(_chunkArray)) {
-      for (const chunk of _chunkArray) {
-        _processChunk(chunk);
-      }
+    for (const chunk of _chunkArray) {
+      _processChunk(chunk);
     }
 
-    // Create (or re-create) the array with a wrapped push.
-    const proxy = new Proxy(_chunkArray ?? [], {
-      get(target, prop) {
-        if (prop === 'push') {
-          return function reflux_chunkPush(chunk) {
-            _processChunk(chunk);
-            return Array.prototype.push.call(target, chunk);
-          };
-        }
-        return target[prop];
-      },
-    });
+    wrapChunkArrayPush(_chunkArray, _processChunk);
+  }
 
-    window[arrayName] = proxy;
+  function wrapWebpackModuleRequire(requireModule, applyPatches) {
+    const wrappedRequire = function fluxtop_require(moduleId) {
+      const exports = requireModule.apply(this, arguments);
+      return applyPatches(exports, moduleId);
+    };
+    Object.assign(wrappedRequire, requireModule);
+    return wrappedRequire;
+  }
+
+  function wrapChunkArrayPush(chunkArray, processChunk) {
+    if (!Array.isArray(chunkArray) || typeof chunkArray.push !== 'function' ||
+        chunkArray.push.__fluxtopWrapped) return false;
+
+    const originalPush = chunkArray.push;
+    const wrappedPush = function fluxtop_chunkPush(...chunks) {
+      for (const chunk of chunks) processChunk(chunk);
+      return originalPush.apply(this, chunks);
+    };
+    Object.defineProperty(wrappedPush, '__fluxtopWrapped', {value: true});
+    Object.defineProperty(chunkArray, 'push', {
+      value: wrappedPush,
+      writable: true,
+      configurable: true,
+      enumerable: false,
+    });
+    return true;
+  }
+
+  function getOriginalFactorySource(factory) {
+    const original = factory?.__fluxtopOriginalFactory || factory;
+    return Function.prototype.toString.call(original);
   }
 
   /**
@@ -210,26 +248,32 @@
       const originalFactory = moduleMap[id];
       if (typeof originalFactory !== 'function') continue;
 
-      moduleMap[id] = function reflux_moduleFactory(module, exports, require) {
+      const wrappedFactory = function fluxtop_moduleFactory(module, exports, require) {
         // Capture the webpack require if we don't have it yet.
         if (!_webpackRequire && typeof require === 'function') {
           _wrapWebpackRequire(require);
         }
 
-        originalFactory(module, exports, require);
+        // Apply patches to imports too, not just fresh module exports. This
+        // lets a plugin adapt a cached Fluxer module when a lazy importer first
+        // requests it, while retaining Rspack's helper properties on require.
+        const fluxtopRequire = wrapWebpackModuleRequire(require, _applyModulePatches);
+        originalFactory(module, exports, fluxtopRequire);
 
         // Apply patches after the factory ran and populated module.exports.
         module.exports = _applyModulePatches(module.exports, id);
       };
 
       // Preserve the original factory's properties (e.g. webpack flags).
-      Object.assign(moduleMap[id], originalFactory);
+      Object.assign(wrappedFactory, originalFactory);
+      Object.defineProperty(wrappedFactory, '__fluxtopOriginalFactory', {value: originalFactory});
+      moduleMap[id] = wrappedFactory;
     }
 
     // Also intercept the runtime callback (3rd element) to grab __webpack_require__.
     if (typeof chunk[2] === 'function') {
       const originalRuntime = chunk[2];
-      chunk[2] = function reflux_runtime(require) {
+      chunk[2] = function fluxtop_runtime(require) {
         if (!_webpackRequire && typeof require === 'function') {
           _wrapWebpackRequire(require);
         }
@@ -255,6 +299,9 @@
     patch(filter, callback) {
       const descriptor = { filter, callback };
       _modulePatches.push(descriptor);
+      applyPatchesToCachedModules(_webpackCache, _applyModulePatches, (err, id) => {
+        console.error(`[Fluxtop:Patcher] Cached module "${id}" patch threw:`, err);
+      });
       return () => {
         const idx = _modulePatches.indexOf(descriptor);
         if (idx !== -1) _modulePatches.splice(idx, 1);
@@ -325,23 +372,23 @@
      */
     register(plugin) {
       if (_plugins.has(plugin.name)) {
-        console.warn(`[Reflux] Plugin "${plugin.name}" already registered.`);
+        console.warn(`[Fluxtop] Plugin "${plugin.name}" already registered.`);
         return;
       }
       let stop = null;
       try {
-        stop = plugin.start(patcher, __reflux) ?? null;
+        stop = plugin.start(patcher, __fluxtop) ?? null;
         _plugins.set(plugin.name, { plugin, stop });
-        console.log(`[Reflux] Plugin "${plugin.name}" started.`);
+        console.log(`[Fluxtop] Plugin "${plugin.name}" started.`);
       } catch (err) {
-        console.error(`[Reflux] Plugin "${plugin.name}" failed to start:`, err);
+        console.error(`[Fluxtop] Plugin "${plugin.name}" failed to start:`, err);
       }
     },
 
     unregister(name) {
       const entry = _plugins.get(name);
       if (!entry) return;
-      try { entry.stop?.(); } catch (err) { console.error(`[Reflux] "${name}" stop() threw:`, err); }
+      try { entry.stop?.(); } catch (err) { console.error(`[Fluxtop] "${name}" stop() threw:`, err); }
       _plugins.delete(name);
     },
 
@@ -352,15 +399,15 @@
   // Global API
   // ---------------------------------------------------------------------------
 
-  const __reflux = {
+  const __fluxtop = {
     version:       '1.0.0',
     patcher,
     pluginManager,
     events,
   };
 
-  Object.defineProperty(window, '__reflux', {
-    value:        __reflux,
+  Object.defineProperty(window, '__fluxtop', {
+    value:        __fluxtop,
     writable:     false,
     configurable: false,
     enumerable:   false,
@@ -372,5 +419,5 @@
 
   _hookChunkPush();
 
-  console.log('[Reflux:Renderer] Bootstrapped. Webpack hook active.');
+  console.log('[Fluxtop:Renderer] Bootstrapped. Webpack hook active.');
 })();

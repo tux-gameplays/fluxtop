@@ -1,9 +1,9 @@
 'use strict';
 
-const {app, BrowserWindow, ipcMain} = require('electron');
+const {app, BrowserWindow, ipcMain, dialog} = require('electron');
 const path = require('node:path');
-const fs = require('node:fs');
 const {Worker} = require('worker_threads');
+const {createInstanceRegistry} = require('./instance-registry.js');
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -11,95 +11,56 @@ const {Worker} = require('worker_threads');
 // In packaged mode, the worker downloads src from GitHub releases instead.
 const DEV_SRC = path.join(__dirname, '..', '..', 'src');
 
-const LOCALAPPDATA =
-	process.env.LOCALAPPDATA || path.join(process.env.USERPROFILE || 'C:\\Users\\Default', 'AppData', 'Local');
-
-const PRODUCT_DIRS = [
-	path.join(LOCALAPPDATA, 'fluxer_app'),
-	path.join(LOCALAPPDATA, 'fluxer_app_canary'),
-	path.join(LOCALAPPDATA, 'Fluxer'),
-	path.join(LOCALAPPDATA, 'Fluxer Canary'),
-	path.join('C:\\', 'Program Files', 'Fluxer', 'resources'),
-	path.join('C:\\', 'Program Files (x86)', 'Fluxer', 'resources'),
-];
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function findLatestResourcesDir(productDir) {
-	if (!fs.existsSync(productDir)) return null;
-	const appDirs = fs
-		.readdirSync(productDir, {withFileTypes: true})
-		.filter((e) => e.isDirectory() && e.name.startsWith('app-'))
-		.map((e) => e.name)
-		.sort()
-		.reverse();
-	for (const dir of appDirs) {
-		const resources = path.join(productDir, dir, 'resources');
-		if (fs.existsSync(path.join(resources, 'app.asar'))) return resources;
-	}
-	return null;
-}
-
-function findResourcesDir() {
-	if (process.env.FLUXER_ASAR) return path.dirname(process.env.FLUXER_ASAR);
-	for (const dir of PRODUCT_DIRS) {
-		if (fs.existsSync(path.join(dir, 'app.asar'))) return dir;
-		const resources = findLatestResourcesDir(dir);
-		if (resources) return resources;
-	}
-	throw new Error("Could not locate Fluxer's resources directory.");
-}
-
-function findResourcesDirForUninstall() {
-	if (process.env.FLUXER_ASAR) return path.dirname(process.env.FLUXER_ASAR);
-	for (const dir of PRODUCT_DIRS) {
-		if (fs.existsSync(path.join(dir, 'app.asar.bak'))) return dir;
-		if (!fs.existsSync(dir)) continue;
-		try {
-			const appDirs = fs
-				.readdirSync(dir, {withFileTypes: true})
-				.filter((e) => e.isDirectory() && e.name.startsWith('app-'))
-				.map((e) => e.name)
-				.sort()
-				.reverse();
-			for (const d of appDirs) {
-				const resources = path.join(dir, d, 'resources');
-				if (fs.existsSync(path.join(resources, 'app.asar.bak'))) return resources;
-			}
-		} catch {
-			/* skip unreadable dirs */
-		}
-	}
-	throw new Error('Could not find app.asar.bak — Reflux may not be installed.');
-}
-
-// ── Status check ──────────────────────────────────────────────────────────────
+const instanceRegistry = createInstanceRegistry();
 
 function checkStatus() {
 	try {
-		const resourcesDir = findResourcesDir();
-		const asarPath = path.join(resourcesDir, 'app.asar');
-		const installed = fs.existsSync(asarPath + '.bak');
-		return {found: true, installed, resourcesDir, error: null};
+		const {instances, selected} = instanceRegistry.refresh();
+		if (!selected) return {found: instances.length > 0, installed: false, instances, selectedId: null, error: null};
+		return {
+			found: true,
+			installed: selected.installed,
+			resourcesDir: selected.resourcesDir,
+			asarPath: selected.asarPath,
+			instances,
+			selectedId: selected.id,
+			writable: selected.writable,
+			conflict: selected.conflict,
+			error: null,
+		};
 	} catch (err) {
-		return {found: false, installed: false, resourcesDir: null, error: err.message};
+		return {found: false, installed: false, instances: [], selectedId: null, error: err.message};
 	}
+}
+
+function requireSelectedInstance(purpose) {
+	const {instances, selected} = instanceRegistry.refresh();
+	if (!selected) {
+		if (instances.length > 1) throw new Error('Select a Fluxer instance before continuing.');
+		throw new Error('Could not locate a supported Fluxer instance.');
+	}
+	if (selected.conflict) throw new Error(`Backup conflict at ${selected.asarPath}; this archive is not a verified Fluxtop install.`);
+	if (!selected.writable) throw new Error(`No write permission for selected Fluxer instance: ${selected.asarPath}`);
+	if (purpose === 'uninstall' && (!selected.installed || !selected.hasBackup)) {
+		throw new Error('Selected instance has no marker-verified Fluxtop installation.');
+	}
+	return selected;
 }
 
 // ── Worker spawn ──────────────────────────────────────────────────────────────
 
-function spawnWorker(win, op, asarPath) {
+function spawnWorker(win, op, asarPath, replaceLegacy = false) {
 	return new Promise((resolve) => {
 		const send = (type, message) => {
-			if (win && !win.isDestroyed()) win.webContents.send('reflux:progress', {type, message});
+			if (win && !win.isDestroyed()) win.webContents.send('fluxtop:progress', {type, message});
 		};
 		const complete = (success, message) => {
-			if (win && !win.isDestroyed()) win.webContents.send('reflux:complete', {success, message});
+			if (win && !win.isDestroyed()) win.webContents.send('fluxtop:complete', {success, message});
 			resolve();
 		};
 
 		const worker = new Worker(path.join(__dirname, 'worker.js'), {
-			workerData: {op, asarPath, isPackaged: app.isPackaged, devSrc: DEV_SRC},
+			workerData: {op, asarPath, isPackaged: app.isPackaged, devSrc: DEV_SRC, replaceLegacy},
 		});
 
 		worker.on('message', (msg) => {
@@ -143,57 +104,97 @@ app.whenReady().then(() => {
 		if (operating) e.preventDefault();
 	});
 
-	ipcMain.handle('reflux:check-status', () => checkStatus());
-	ipcMain.handle('reflux:version', () => app.getVersion());
+	ipcMain.handle('fluxtop:check-status', () => checkStatus());
+	ipcMain.handle('fluxtop:version', () => app.getVersion());
+	ipcMain.handle('fluxtop:select-instance', (_event, id) => {
+		instanceRegistry.select(id);
+		return checkStatus();
+	});
+	ipcMain.handle('fluxtop:select-manual-instance', (_event, input) => {
+		instanceRegistry.selectManual(input);
+		return checkStatus();
+	});
+	ipcMain.handle('fluxtop:pick-instance-file', async () => {
+		const result = await dialog.showOpenDialog(win, {
+			properties: ['openFile'],
+			filters: [{name: 'Fluxer archive', extensions: ['asar']}],
+		});
+		if (result.canceled || !result.filePaths.length) return checkStatus();
+		instanceRegistry.selectManual(result.filePaths[0]);
+		return checkStatus();
+	});
+	ipcMain.handle('fluxtop:pick-instance-resources', async () => {
+		const result = await dialog.showOpenDialog(win, {
+			properties: ['openDirectory'],
+		});
+		if (result.canceled || !result.filePaths.length) return checkStatus();
+		instanceRegistry.selectManual(result.filePaths[0]);
+		return checkStatus();
+	});
 
-	ipcMain.on('reflux:install', async () => {
+	ipcMain.on('fluxtop:install', async () => {
 		operating = true;
 		try {
-			const resourcesDir = findResourcesDir();
-			const asarPath = path.join(resourcesDir, 'app.asar');
-			await spawnWorker(win, 'install', asarPath);
+			const selected = requireSelectedInstance('install');
+			let replaceLegacy = false;
+			if (selected.legacyInstalled) {
+				const result = await dialog.showMessageBox(win, {
+					type: 'warning',
+					buttons: ['Cancel', 'Replace Reflux with Fluxtop'],
+					defaultId: 0,
+					cancelId: 0,
+					title: 'Replace Reflux injection?',
+					message: 'This will replace the Reflux injection in the selected Fluxer instance.',
+					detail: 'Fluxtop will first copy Reflux settings and imported plugins on startup. Your Reflux settings file and the original app.asar backup will be retained. Continue only if you want Fluxtop to replace Reflux.',
+				});
+				if (result.response !== 1) {
+					if (win && !win.isDestroyed()) win.webContents.send('fluxtop:complete', {success: false, message: 'Replacement cancelled; no files were changed.'});
+					return;
+				}
+				replaceLegacy = true;
+			}
+			await spawnWorker(win, 'install', selected.asarPath, replaceLegacy);
 		} catch (err) {
 			if (win && !win.isDestroyed()) {
-				win.webContents.send('reflux:progress', {type: 'error', message: err.message});
-				win.webContents.send('reflux:complete', {success: false, message: err.message});
+				win.webContents.send('fluxtop:progress', {type: 'error', message: err.message});
+				win.webContents.send('fluxtop:complete', {success: false, message: err.message});
 			}
 		} finally {
 			operating = false;
 		}
 	});
 
-	ipcMain.on('reflux:uninstall', async () => {
+	ipcMain.on('fluxtop:uninstall', async () => {
 		operating = true;
 		try {
-			const resourcesDir = findResourcesDirForUninstall();
-			const asarPath = path.join(resourcesDir, 'app.asar');
-			await spawnWorker(win, 'uninstall', asarPath);
+			const selected = requireSelectedInstance('uninstall');
+			await spawnWorker(win, 'uninstall', selected.asarPath);
 		} catch (err) {
 			if (win && !win.isDestroyed()) {
-				win.webContents.send('reflux:progress', {type: 'error', message: err.message});
-				win.webContents.send('reflux:complete', {success: false, message: err.message});
+				win.webContents.send('fluxtop:progress', {type: 'error', message: err.message});
+				win.webContents.send('fluxtop:complete', {success: false, message: err.message});
 			}
 		} finally {
 			operating = false;
 		}
 	});
 
-	ipcMain.on('reflux:update', async () => {
+	ipcMain.on('fluxtop:update', async () => {
 		operating = true;
 		try {
 			await spawnWorker(win, 'update', null);
 		} catch (err) {
 			if (win && !win.isDestroyed()) {
-				win.webContents.send('reflux:progress', {type: 'error', message: err.message});
-				win.webContents.send('reflux:complete', {success: false, message: err.message});
+				win.webContents.send('fluxtop:progress', {type: 'error', message: err.message});
+				win.webContents.send('fluxtop:complete', {success: false, message: err.message});
 			}
 		} finally {
 			operating = false;
 		}
 	});
 
-	ipcMain.on('reflux:minimize', () => win.minimize());
-	ipcMain.on('reflux:close', () => app.quit());
+	ipcMain.on('fluxtop:minimize', () => win.minimize());
+	ipcMain.on('fluxtop:close', () => app.quit());
 });
 
 app.on('window-all-closed', () => app.quit());

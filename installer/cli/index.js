@@ -1,14 +1,14 @@
 /**
  * installer/index.js
  *
- * Locates Fluxer's installed resources on Windows and injects Reflux by:
+ * Locates Fluxer's installed resources on Windows and injects Fluxtop by:
  *
  *   1. Backing up the original app.asar as app.asar.bak (idempotent).
  *   2. Injecting into the already-unpacked preload script
  *      (app.asar.unpacked/src-electron/dist/preload/index.js) — no repacking
  *      needed because Electron always reads this file from the filesystem.
  *   3. Injecting a `await import(...)` line into the main-process entry inside
- *      app.asar so that Reflux's main-side code (CSP stripping, content script
+ *      app.asar so that Fluxtop's main-side code (CSP stripping, content script
  *      injection) runs before any Fluxer windows are created.
  *
  * Fluxer uses the Squirrel Windows installer, so the install path is:
@@ -25,6 +25,15 @@ const path = require('path');
 const fs   = require('fs');
 const asar = require('@electron/asar');
 const {pathToFileURL} = require('url');
+const {createInterface} = require('node:readline/promises');
+const {
+  FLUXTOP_MARKER,
+  MAIN_ENTRY_CANDIDATES,
+  chooseInstance,
+  discoverInstances,
+  normalizeAsarPath,
+  validateReplacementBackup,
+} = require('../lib/instances.js');
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -33,81 +42,100 @@ const {pathToFileURL} = require('url');
 // When compiled with pkg, __dirname is a virtual snapshot path.
 // Use the exe's actual directory and navigate up to the repo root instead.
 const _BASE = process.pkg ? path.dirname(process.execPath) : path.resolve(__dirname, '..');
-const REFLUX_ROOT   = path.resolve(_BASE, '..');
-const REFLUX_MAIN   = path.join(REFLUX_ROOT, 'src', 'main-inject.mjs');
-const REFLUX_PRELOAD = path.join(REFLUX_ROOT, 'src', 'preload.js');
-
-/**
- * Squirrel installs Fluxer into versioned subdirectories under %LOCALAPPDATA%.
- * We search inside each product name's folder for the latest app-<version>.
- */
-const LOCALAPPDATA = process.env.LOCALAPPDATA || path.join(process.env.USERPROFILE || 'C:\\Users\\Default', 'AppData', 'Local');
-
-const PRODUCT_DIRS = [
-  path.join(LOCALAPPDATA, 'fluxer_app'),         // standard install (confirmed)
-  path.join(LOCALAPPDATA, 'fluxer_app_canary'),  // canary variant (assumed)
-  path.join(LOCALAPPDATA, 'Fluxer'),             // legacy / alternative name
-  path.join(LOCALAPPDATA, 'Fluxer Canary'),
-  // Traditional installers:
-  path.join('C:\\', 'Program Files', 'Fluxer', 'resources'),
-  path.join('C:\\', 'Program Files (x86)', 'Fluxer', 'resources'),
-];
+const FLUXTOP_ROOT   = path.resolve(_BASE, '..');
+const FLUXTOP_MAIN   = path.join(FLUXTOP_ROOT, 'src', 'main-inject.mjs');
 
 /** Path inside the asar where the main-process entry lives (ESM). */
-const ASAR_MAIN_ENTRY = 'src-electron/dist/main/index.js';
-
-/** Path inside the asar where the preload entry lives (also unpacked to disk). */
-const ASAR_PRELOAD_ENTRY = 'src-electron/dist/preload/index.js';
+const ASAR_MAIN_ENTRY = 'dist/main/index.js';
+const MAIN_ENTRIES = [...new Set([ASAR_MAIN_ENTRY, ...MAIN_ENTRY_CANDIDATES])];
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Within a Squirrel product directory, find the resources folder of the latest
- * installed version (app-<semver>/resources).
- * @param {string} productDir  e.g. %LOCALAPPDATA%\Fluxer
- * @returns {string|null}
- */
-function findLatestResourcesDir(productDir) {
-  if (!fs.existsSync(productDir)) return null;
-
-  const appDirs = fs.readdirSync(productDir, { withFileTypes: true })
-    .filter(e => e.isDirectory() && e.name.startsWith('app-'))
-    .map(e => e.name)
-    .sort()          // lexicographic sort is fine for semver-like "app-1.2.3"
-    .reverse();      // newest first
-
-  for (const dir of appDirs) {
-    const resources = path.join(productDir, dir, 'resources');
-    const asarPath  = path.join(resources, 'app.asar');
-    if (fs.existsSync(asarPath)) return resources;
-  }
-  return null;
+function promptForInstance(instances) {
+  const rl = createInterface({input: process.stdin, output: process.stdout});
+  console.log('Multiple Fluxer instances found:');
+  instances.forEach((instance, index) => console.log(`  ${index + 1}) ${instance.label} — ${instance.asarPath}`));
+  return rl.question('Select an instance number: ').finally(() => rl.close());
 }
 
-/**
- * Locate Fluxer's resources directory.
- * @returns {string}
- */
-function findResourcesDir() {
+function inspectMainEntry(asarPath) {
+  asar.uncache?.(asarPath);
+  for (const entry of MAIN_ENTRIES) {
+    try {
+      return {entry, source: asar.extractFile(asarPath, entry).toString('utf8')};
+    } catch {
+      // Continue through the supported Fluxer archive layouts.
+    }
+  }
+  throw new Error(`Main entry not found in app.asar. Tried: ${MAIN_ENTRIES.join(', ')}`);
+}
+
+function isLegacyRefluxInjection(source) {
+  return /await\s+import\(\s*["']file:\/\/[^"']*reflux[^"']*main-inject\.mjs["']\s*\)/i.test(String(source));
+}
+
+async function confirmLegacyReplacement() {
+  if (process.env.FLUXTOP_REPLACE_REFLUX === '1') return true;
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error('Replacing the Reflux injection requires confirmation. Re-run interactively or set FLUXTOP_REPLACE_REFLUX=1.');
+  }
+  const rl = createInterface({input: process.stdin, output: process.stdout});
+  try {
+    const answer = await rl.question('Replace the Reflux injection with Fluxtop? Reflux settings and the original backup will be retained. [y/N] ');
+    return /^y(?:es)?$/i.test(answer.trim());
+  } finally {
+    rl.close();
+  }
+}
+
+function assertTarget(asarPath, purpose) {
+  if (!fs.existsSync(asarPath)) throw new Error(`Fluxer archive not found: ${asarPath}`);
+  const resourcesDir = path.dirname(asarPath);
+  try {
+    fs.accessSync(resourcesDir, fs.constants.W_OK);
+    fs.accessSync(asarPath, fs.constants.W_OK);
+  } catch {
+    throw new Error(`No write permission for selected Fluxer instance: ${asarPath}`);
+  }
+
+  const {source} = inspectMainEntry(asarPath);
+  const installed = source.includes(FLUXTOP_MARKER);
+  const legacyInstalled = isLegacyRefluxInjection(source);
+  const hasBackup = fs.existsSync(`${asarPath}.bak`);
+  if (hasBackup && !installed && !legacyInstalled) {
+    throw new Error('A backup exists but this archive is not marked as a Fluxtop install; refusing to modify it.');
+  }
+  if ((installed || legacyInstalled) && !hasBackup) {
+    throw new Error('Fluxtop or Reflux injection found but its backup is missing; refusing to modify this instance.');
+  }
+  if (legacyInstalled) validateReplacementBackup(asarPath);
+  if (purpose === 'uninstall' && (!installed || !hasBackup)) {
+    throw new Error('This Fluxer instance has no marker-verified Fluxtop install to uninstall.');
+  }
+}
+
+async function findResourcesDir(purpose = 'install') {
   if (process.env.FLUXER_ASAR) {
-    return path.dirname(process.env.FLUXER_ASAR);
+    const target = normalizeAsarPath(process.env.FLUXER_ASAR, path);
+    assertTarget(target.asarPath, purpose);
+    return target.resourcesDir;
   }
 
-  for (const dir of PRODUCT_DIRS) {
-    // Direct resources dir (Program Files style).
-    if (fs.existsSync(path.join(dir, 'app.asar'))) return dir;
-    // Squirrel style — find latest versioned subdir.
-    const resources = findLatestResourcesDir(dir);
-    if (resources) return resources;
+  const instances = discoverInstances({purpose});
+  const instance = await chooseInstance(instances, {
+    env: process.env,
+    stdin: process.stdin,
+    stdout: process.stdout,
+    prompt: promptForInstance,
+  });
+  if (instance.conflict) {
+    throw new Error(`A backup exists but ${instance.asarPath} is not marked as a Fluxtop install; refusing to modify it.`);
   }
-
-  throw new Error(
-    'Could not locate Fluxer\'s resources directory.\n' +
-    'Searched:\n' + PRODUCT_DIRS.map(d => '  ' + d).join('\n') + '\n' +
-    'Set FLUXER_ASAR=/full/path/to/app.asar and retry.'
-  );
+  if (!instance.writable) throw new Error(`No write permission for selected Fluxer instance: ${instance.asarPath}`);
+  assertTarget(instance.asarPath, purpose);
+  return instance.resourcesDir;
 }
 
 /**
@@ -119,7 +147,7 @@ function findResourcesDir() {
  */
 function prependOnce(filePath, line) {
   const contents = fs.readFileSync(filePath, 'utf8');
-  if (contents.startsWith(line)) {
+  if (contents.includes(FLUXTOP_MARKER)) {
     return false; // already injected
   }
   fs.writeFileSync(filePath, line + '\n' + contents, 'utf8');
@@ -131,49 +159,44 @@ function prependOnce(filePath, line) {
 // ---------------------------------------------------------------------------
 
 async function main() {
-  const resourcesDir = findResourcesDir();
+  const resourcesDir = await findResourcesDir('install');
   const asarPath     = path.join(resourcesDir, 'app.asar');
   const bakPath      = asarPath + '.bak';
-  const unpackedDir  = asarPath + '.unpacked'; // Electron's standard name
 
-  console.log(`[Reflux] Resources dir: ${resourcesDir}`);
+  console.log(`[Fluxtop] Resources dir: ${resourcesDir}`);
+
+  const currentMain = inspectMainEntry(asarPath);
+  if (isLegacyRefluxInjection(currentMain.source)) {
+    if (!fs.existsSync(bakPath)) throw new Error('Reflux injection found but its original backup is missing.');
+    if (!await confirmLegacyReplacement()) throw new Error('Replacement cancelled; no files were changed.');
+    fs.copyFileSync(bakPath, asarPath);
+    asar.uncache?.(asarPath);
+    console.log('[Fluxtop] Restored the original archive from the existing backup; preserving that backup.');
+  }
 
   // ── Step 1: Backup ──────────────────────────────────────────────────────
   if (!fs.existsSync(bakPath)) {
     fs.copyFileSync(asarPath, bakPath);
-    console.log(`[Reflux] Backup created: ${bakPath}`);
+    console.log(`[Fluxtop] Backup created: ${bakPath}`);
   } else {
-    console.log(`[Reflux] Backup already present: ${bakPath}`);
+    console.log(`[Fluxtop] Backup already present: ${bakPath}`);
   }
 
-  // ── Step 2: Clean up any old preload injection (from a previous approach) ──
-  // Sandboxed preloads cannot require() arbitrary files outside the asar.
-  // Reflux's preload is now loaded via session.setPreloads() in main-inject.mjs,
-  // so any previously injected require() line must be removed.
-  const unpackedPreload = path.join(unpackedDir, ASAR_PRELOAD_ENTRY);
-  if (fs.existsSync(unpackedPreload)) {
-    const oldInjectLine = `require(${JSON.stringify(REFLUX_PRELOAD.replace(/\\/g, '/'))});\n`;
-    let contents = fs.readFileSync(unpackedPreload, 'utf8');
-    if (contents.startsWith(oldInjectLine)) {
-      fs.writeFileSync(unpackedPreload, contents.slice(oldInjectLine.length), 'utf8');
-      console.log('[Reflux] Removed old preload injection line.');
-    }
-  }
-
-  // ── Step 3: Patch the main-process entry inside the asar ────────────────
-  // We need to inject our main-side bootstrap so Reflux can:
+  // ── Step 2: Patch the main-process entry inside the asar ────────────────
+  // We need to inject our main-side bootstrap so Fluxtop can:
   //  • Strip CSP headers (allowing renderer content-script injection)
   //  • Inject renderer.js into the web context via webContents events
   //
   // The main entry is ESM (type: "module"), so we use top-level await + dynamic import.
-  const tmpDir = path.join(resourcesDir, '.reflux-tmp');
+  const tmpDir = path.join(resourcesDir, '.fluxtop-tmp');
   if (fs.existsSync(tmpDir)) fs.rmSync(tmpDir, { recursive: true });
   fs.mkdirSync(tmpDir);
 
-  console.log('[Reflux] Extracting asar to patch main entry…');
+  console.log('[Fluxtop] Extracting asar to patch main entry…');
+  const mainEntry = inspectMainEntry(asarPath).entry;
   // Extract only the main entry file for efficiency; fall back to full extract.
   try {
-    asar.extractFile(asarPath, ASAR_MAIN_ENTRY, path.join(tmpDir, 'main_index.js'));
+    asar.extractFile(asarPath, mainEntry, path.join(tmpDir, 'main_index.js'));
   } catch {
     asar.extractAll(asarPath, tmpDir);
   }
@@ -182,9 +205,9 @@ async function main() {
   if (!fs.existsSync(mainEntryInTmp)) {
     // Full extract fallback.
     asar.extractAll(asarPath, tmpDir);
-    const fullPath = path.join(tmpDir, ...ASAR_MAIN_ENTRY.split('/'));
+    const fullPath = path.join(tmpDir, ...mainEntry.split('/'));
     if (!fs.existsSync(fullPath)) {
-      throw new Error(`Cannot find ${ASAR_MAIN_ENTRY} inside the asar.`);
+      throw new Error(`Cannot find ${mainEntry} inside the asar.`);
     }
     // Re-point.
     fs.copyFileSync(fullPath, mainEntryInTmp);
@@ -192,38 +215,38 @@ async function main() {
 
   // Injection line — dynamic import works in top-level ESM.
   // On Windows, dynamic import() requires a file:// URL — raw C:\... paths are rejected by the ESM loader.
-  const mainInjectUrl  = pathToFileURL(REFLUX_MAIN).href;
-  const mainInjectLine = `await import(${JSON.stringify(mainInjectUrl)});`;
+  const mainInjectUrl  = pathToFileURL(FLUXTOP_MAIN).href;
+  const mainInjectLine = `${FLUXTOP_MARKER}\nawait import(${JSON.stringify(mainInjectUrl)});`;
   const alreadyPatched = prependOnce(mainEntryInTmp, mainInjectLine);
 
   if (!alreadyPatched) {
-    console.log('[Reflux] Main entry already patched — skipping asar repack.');
+    console.log('[Fluxtop] Main entry already patched — skipping asar repack.');
     fs.rmSync(tmpDir, { recursive: true });
   } else {
     // We only changed one file — do a full extract + replace + repack.
-    const fullExtractDir = path.join(resourcesDir, '.reflux-full-extract');
+    const fullExtractDir = path.join(resourcesDir, '.fluxtop-full-extract');
     if (fs.existsSync(fullExtractDir)) fs.rmSync(fullExtractDir, { recursive: true });
 
-    console.log('[Reflux] Extracting full asar for repack…');
+    console.log('[Fluxtop] Extracting full asar for repack…');
     asar.extractAll(asarPath, fullExtractDir);
 
     // Replace the main entry with our patched version.
-    const mainEntryInFull = path.join(fullExtractDir, ...ASAR_MAIN_ENTRY.split('/'));
+    const mainEntryInFull = path.join(fullExtractDir, ...mainEntry.split('/'));
     fs.copyFileSync(mainEntryInTmp, mainEntryInFull);
 
-    console.log('[Reflux] Repacking asar…');
+    console.log('[Fluxtop] Repacking asar…');
     await asar.createPackage(fullExtractDir, asarPath);
 
     fs.rmSync(tmpDir, { recursive: true });
     fs.rmSync(fullExtractDir, { recursive: true });
 
-    console.log(`[Reflux] Main entry patched: ${ASAR_MAIN_ENTRY}`);
+    console.log(`[Fluxtop] Main entry patched: ${mainEntry}`);
   }
 
-  console.log('\n[Reflux] Installation complete! Restart Fluxer to activate Reflux.');
+  console.log('\n[Fluxtop] Installation complete! Restart Fluxer to activate Fluxtop.');
 }
 
 main().catch(err => {
-  console.error('[Reflux] Installation failed:', err.message);
+  console.error('[Fluxtop] Installation failed:', err.message);
   process.exit(1);
 });

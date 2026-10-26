@@ -1,69 +1,40 @@
 'use strict';
 
-/**
- * installer/build.js
- *
- * Builds both Windows installer artifacts and places them in installer/dist/:
- *
- *   reflux-v{version}-win-x64-setup.exe  — GUI (Electron portable, bundles src/)
- *   reflux-v{version}-win-x64-cli.exe    — CLI (pkg single-file, run from repo root)
- *
- * Usage:
- *   node installer/build.js          (from repo root)
- *   node build.js                    (from installer/)
- *
- * Prerequisites: pnpm install inside installer/ first.
- */
+const {execSync} = require('node:child_process');
+const path = require('node:path');
+const fs = require('node:fs');
+const {artifactName, cliTarget} = require('./build-config.js');
 
-const {execSync} = require('child_process');
-const path = require('path');
-const fs = require('fs');
-
-const ROOT = __dirname; // installer/
+const ROOT = __dirname;
 const {version} = require(path.join(ROOT, 'package.json'));
 const DIST = path.join(ROOT, 'dist');
+const platform = process.platform === 'win32' ? 'win-x64' : process.platform === 'linux' ? 'linux-x64' : null;
 
-if (!fs.existsSync(DIST)) fs.mkdirSync(DIST, {recursive: true});
+if (!platform) throw new Error(`Unsupported installer build host: ${process.platform}`);
+if (process.arch !== 'x64') throw new Error(`Only x64 installer builds are supported; got ${process.arch}`);
+fs.mkdirSync(DIST, {recursive: true});
 
-const tag = `v${version}`;
-const platform = 'win-x64';
+console.log(`\nBuilding Fluxtop v${version} — ${platform}\n${'─'.repeat(44)}`);
 
-console.log(`\nBuilding Reflux ${tag} — Windows x64\n${'─'.repeat(44)}`);
-
-// ── 1. GUI: electron-builder portable ────────────────────────────────────────
-console.log('\n[1/2] GUI installer (electron-builder portable)…');
-
-execSync('npx electron-builder --win portable --publish never', {
-	cwd: ROOT,
-	stdio: 'inherit',
-	env: {
-		...process.env,
-		// Suppress code-signing prompts in CI / local builds without a cert.
-		CSC_IDENTITY_AUTO_DISCOVERY: 'false',
-	},
+const guiArgs = platform === 'win-x64' ? '--win portable --x64' : '--linux AppImage --x64';
+console.log('\n[1/2] GUI installer (electron-builder)…');
+execSync(`npx electron-builder ${guiArgs} --publish never`, {
+  cwd: ROOT,
+  stdio: 'inherit',
+  env: {...process.env, CSC_IDENTITY_AUTO_DISCOVERY: 'false'},
 });
 
-console.log('[1/2] Done.');
-
-// ── 2. CLI: pkg single-file exe ───────────────────────────────────────────────
 console.log('\n[2/2] CLI installer (pkg)…');
-
-const cliOut = path.join(DIST, `reflux-${tag}-${platform}-cli.exe`);
-
-execSync(`npx pkg cli/index.js --targets node20-win-x64 --output "${cliOut}"`, {
-	cwd: ROOT,
-	stdio: 'inherit',
+const cliOut = path.join(DIST, artifactName(platform, version, 'cli'));
+execSync(`npx pkg cli/index.js --targets ${cliTarget(platform)} --output "${cliOut}"`, {
+  cwd: ROOT,
+  stdio: 'inherit',
 });
 
-console.log('[2/2] Done.');
-
-// ── Summary ───────────────────────────────────────────────────────────────────
 console.log(`\n${'─'.repeat(44)}\nArtifacts in installer/dist/:\n`);
-
-for (const f of fs.readdirSync(DIST)) {
-	if (!f.endsWith('.exe') && !f.endsWith('.zip')) continue;
-	const {size} = fs.statSync(path.join(DIST, f));
-	console.log(`  ${f}  (${(size / 1_048_576).toFixed(1)} MB)`);
+for (const file of fs.readdirSync(DIST)) {
+	if (!file.endsWith('.exe') && !file.endsWith('.AppImage') && !file.endsWith('.zip') && !file.endsWith('-linux-x64-cli')) continue;
+  const {size} = fs.statSync(path.join(DIST, file));
+  console.log(`  ${file}  (${(size / 1_048_576).toFixed(1)} MB)`);
 }
-
 console.log();

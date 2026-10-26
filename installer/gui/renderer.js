@@ -6,6 +6,11 @@ const ctx = {
 	found: false,
 	installed: false,
 	resourcesDir: null,
+	instances: [],
+	selectedId: null,
+	selectedAsarPath: null,
+	writable: false,
+	conflict: false,
 	detectError: null,
 	lastOp: null, // 'install' | 'repair' | 'uninstall'
 	doneSuccess: false,
@@ -33,6 +38,9 @@ const btnDecline = $('btn-decline');
 const statusPill = $('status-pill');
 const statusText = $('status-text');
 const statusDesc = $('status-desc');
+const instanceSelect = $('instance-select');
+const btnPickAsar = $('btn-pick-asar');
+const btnPickResources = $('btn-pick-resources');
 const errorNote = $('error-note');
 const btnInstall = $('btn-install');
 const btnUpdate = $('btn-update');
@@ -164,8 +172,16 @@ function render(direction = 'forward') {
 		case 'READY': {
 			showSection(sReady, direction);
 			errorNote.style.display = 'none';
+			renderInstances();
 
-			if (!ctx.found) {
+			if (ctx.instances.length > 0 && !ctx.selectedId) {
+				statusPill.className = 'status-pill not-found';
+				statusText.textContent = 'Select Fluxer';
+				statusDesc.textContent = 'Choose which Fluxer installation Fluxtop should manage.';
+				btnRowUpdate.style.display = 'none';
+				btnInstall.disabled = true;
+				btnUninstall.disabled = true;
+			} else if (!ctx.found) {
 				statusPill.className = 'status-pill not-found';
 				statusText.textContent = 'Fluxer Not Found';
 				statusDesc.textContent = 'Could not locate Fluxer on your system. Make sure Fluxer is installed first.';
@@ -176,10 +192,24 @@ function render(direction = 'forward') {
 					errorNote.textContent = ctx.detectError;
 					errorNote.style.display = 'block';
 				}
+			} else if (ctx.conflict) {
+				statusPill.className = 'status-pill not-found';
+				statusText.textContent = 'Backup conflict';
+				statusDesc.textContent = 'A backup exists but this archive is not marked as a Fluxtop installation. It will not be changed.';
+				btnRowUpdate.style.display = 'none';
+				btnInstall.disabled = true;
+				btnUninstall.disabled = true;
+			} else if (!ctx.writable) {
+				statusPill.className = 'status-pill not-found';
+				statusText.textContent = 'No write permission';
+				statusDesc.textContent = 'Fluxtop cannot modify this Fluxer installation with the current user permissions.';
+				btnRowUpdate.style.display = 'none';
+				btnInstall.disabled = true;
+				btnUninstall.disabled = true;
 			} else if (ctx.installed) {
 				statusPill.className = 'status-pill installed';
-				statusText.textContent = 'Reflux Installed';
-				statusDesc.textContent = 'Reflux is active. Restart Fluxer after making changes.';
+				statusText.textContent = 'Fluxtop Installed';
+				statusDesc.textContent = 'Fluxtop is active. Restart Fluxer after making changes.';
 				btnRowUpdate.style.display = 'flex';
 				btnInstall.textContent = 'Repair';
 				btnInstall.disabled = false;
@@ -189,7 +219,7 @@ function render(direction = 'forward') {
 			} else {
 				statusPill.className = 'status-pill not-installed';
 				statusText.textContent = 'Not Installed';
-				statusDesc.textContent = 'Fluxer is detected. Install Reflux to get started.';
+				statusDesc.textContent = 'Fluxer is detected. Install Fluxtop to get started.';
 				btnRowUpdate.style.display = 'none';
 				btnInstall.textContent = 'Install';
 				btnInstall.disabled = false;
@@ -205,12 +235,12 @@ function render(direction = 'forward') {
 			logContainer.innerHTML = '';
 			opTitle.textContent =
 				ctx.lastOp === 'uninstall'
-					? 'Uninstalling Reflux…'
+					? 'Uninstalling Fluxtop…'
 					: ctx.lastOp === 'repair'
-						? 'Repairing Reflux…'
+						? 'Repairing Fluxtop…'
 						: ctx.lastOp === 'update'
-							? 'Updating Reflux…'
-							: 'Installing Reflux…';
+							? 'Updating Fluxtop…'
+							: 'Installing Fluxtop…';
 			break;
 		}
 
@@ -262,6 +292,44 @@ function transition(newState, patch = {}, direction = 'forward') {
 	render(direction);
 }
 
+function renderInstances() {
+	const instances = ctx.instances || [];
+	instanceSelect.style.display = instances.length > 1 || (!ctx.selectedId && instances.length > 0) ? 'block' : 'none';
+	instanceSelect.innerHTML = '';
+	if (instances.length > 0 && !ctx.selectedId) {
+		const placeholder = document.createElement('option');
+		placeholder.value = '';
+		placeholder.textContent = 'Select a Fluxer installation';
+		placeholder.selected = true;
+		placeholder.disabled = true;
+		instanceSelect.appendChild(placeholder);
+	}
+	for (const instance of instances) {
+		const option = document.createElement('option');
+		option.value = instance.id;
+		option.textContent = `${instance.label} — ${instance.asarPath}`;
+		option.selected = instance.id === ctx.selectedId;
+		instanceSelect.appendChild(option);
+	}
+	if (ctx.selectedId && !instances.some((instance) => instance.id === ctx.selectedId)) {
+		instanceSelect.value = '';
+	}
+}
+
+function statusPatch(status) {
+	return {
+		found: status.found,
+		installed: status.installed,
+		resourcesDir: status.resourcesDir,
+		instances: status.instances || [],
+		selectedId: status.selectedId,
+		selectedAsarPath: status.asarPath,
+		writable: status.writable,
+		conflict: status.conflict,
+		detectError: status.error,
+	};
+}
+
 // ── ToS scroll gate ────────────────────────────────────────────────────────────
 tosBox.addEventListener('scroll', () => {
 	const atBottom = tosBox.scrollTop + tosBox.clientHeight >= tosBox.scrollHeight - 4;
@@ -272,11 +340,11 @@ tosBox.addEventListener('scroll', () => {
 });
 
 // ── IPC ────────────────────────────────────────────────────────────────────────
-window.refluxInstaller.onProgress(({type, message}) => {
+window.fluxtopInstaller.onProgress(({type, message}) => {
 	if (state === 'OPERATING') appendLogLine(type, message);
 });
 
-window.refluxInstaller.onComplete(({success, message}) => {
+window.fluxtopInstaller.onComplete(({success, message}) => {
 	transition('DONE', {doneSuccess: success, doneMessage: message}, 'forward');
 });
 
@@ -285,79 +353,73 @@ $('btn-start').addEventListener('click', () => {
 	transition('TOS', {}, 'forward');
 });
 
-btnDecline.addEventListener('click', () => window.refluxInstaller.close());
+btnDecline.addEventListener('click', () => window.fluxtopInstaller.close());
+
+instanceSelect.addEventListener('change', async () => {
+	const status = await window.fluxtopInstaller.selectInstance(instanceSelect.value);
+	transition('READY', statusPatch(status), 'forward');
+});
+
+btnPickAsar.addEventListener('click', async () => {
+	const status = await window.fluxtopInstaller.pickInstanceFile();
+	transition('READY', statusPatch(status), 'forward');
+});
+
+btnPickResources.addEventListener('click', async () => {
+	const status = await window.fluxtopInstaller.pickInstanceResources();
+	transition('READY', statusPatch(status), 'forward');
+});
 
 btnAccept.addEventListener('click', async () => {
 	transition('LOADING', {}, 'forward');
-	const status = await window.refluxInstaller.checkStatus();
-	transition(
-		'READY',
-		{
-			found: status.found,
-			installed: status.installed,
-			resourcesDir: status.resourcesDir,
-			detectError: status.error,
-		},
-		'forward',
-	);
+	const status = await window.fluxtopInstaller.checkStatus();
+	transition('READY', statusPatch(status), 'forward');
 });
 
 btnUpdate.addEventListener('click', () => {
 	transition('OPERATING', {lastOp: 'update'}, 'forward');
-	window.refluxInstaller.update();
+	window.fluxtopInstaller.update();
 });
 
 btnInstall.addEventListener('click', () => {
 	if (btnInstall.disabled) return;
 	const isRepair = ctx.installed;
 	transition('OPERATING', {lastOp: isRepair ? 'repair' : 'install'}, 'forward');
-	window.refluxInstaller.install();
+	window.fluxtopInstaller.install();
 });
 
 btnUninstall.addEventListener('click', () => {
 	if (btnUninstall.disabled) return;
 	transition('OPERATING', {lastOp: 'uninstall'}, 'forward');
-	window.refluxInstaller.uninstall();
+	window.fluxtopInstaller.uninstall();
 });
 
 btnDone.addEventListener('click', async () => {
 	transition('LOADING', {}, 'back');
-	const status = await window.refluxInstaller.checkStatus();
-	transition(
-		'READY',
-		{
-			found: status.found,
-			installed: status.installed,
-			resourcesDir: status.resourcesDir,
-			detectError: status.error,
-		},
-		'back',
-	);
+	const status = await window.fluxtopInstaller.checkStatus();
+	transition('READY', statusPatch(status), 'back');
 });
 
-$('btn-minimize').addEventListener('click', () => window.refluxInstaller.minimize());
-$('btn-close').addEventListener('click', () => window.refluxInstaller.close());
+$('btn-minimize').addEventListener('click', () => window.fluxtopInstaller.minimize());
+$('btn-close').addEventListener('click', () => window.fluxtopInstaller.close());
 
 // ── Init — check status on startup ─────────────────────────────────────────────
 (async () => {
 	updateSteps('LOADING');
 	showSection(sLoading);
 
-	window.refluxInstaller.version().then((v) => {
+	window.fluxtopInstaller.version().then((v) => {
 		const badge = $('version-badge');
 		if (badge && v) badge.textContent = v;
 	});
 
-	const status = await window.refluxInstaller.checkStatus();
+	const status = await window.fluxtopInstaller.checkStatus();
 	if (status.installed) {
 		// Already installed — skip welcome/ToS, go straight to Repair/Uninstall
 		transition(
 			'READY',
 			{
-				found: status.found,
-				installed: status.installed,
-				resourcesDir: status.resourcesDir,
-				detectError: status.error,
+				...statusPatch(status),
 			},
 			'forward',
 		);

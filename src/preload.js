@@ -1,7 +1,7 @@
 /**
  * src/preload.js
  *
- * Reflux preload bootstrap.  Injected via a require() prepend into
+ * Fluxtop preload bootstrap.  Injected via a require() prepend into
  * Fluxer's already-unpacked preload script:
  *   app.asar.unpacked/src-electron/dist/preload/index.js
  *
@@ -21,9 +21,9 @@
  * via webContents.executeJavaScript().
  *
  * This preload's job is lighter:
- *   1. Register IPC handlers that relay Reflux settings/plugin commands from
+ *   1. Register IPC handlers that relay Fluxtop settings/plugin commands from
  *      the renderer <-> main process.
- *   2. Expose a `window.refluxBridge` in the main world via contextBridge so
+ *   2. Expose a `window.fluxtopBridge` in the main world via contextBridge so
  *      renderer.js plugins can call Electron APIs they wouldn't otherwise have.
  */
 
@@ -36,12 +36,12 @@ const {contextBridge, ipcRenderer} = require('electron');
 // ---------------------------------------------------------------------------
 
 const CH = {
-  GET_SETTING:    'reflux:get-setting',
-  SET_SETTING:    'reflux:set-setting',
-  GET_ALL:        'reflux:get-all-settings',
-  PLUGIN_LIST:    'reflux:plugin-list',
-  PLUGIN_ENABLE:  'reflux:plugin-enable',
-  PLUGIN_DISABLE: 'reflux:plugin-disable',
+  GET_SETTING:    'fluxtop:get-setting',
+  SET_SETTING:    'fluxtop:set-setting',
+  GET_ALL:        'fluxtop:get-all-settings',
+  PLUGIN_LIST:    'fluxtop:plugin-list',
+  PLUGIN_ENABLE:  'fluxtop:plugin-enable',
+  PLUGIN_DISABLE: 'fluxtop:plugin-disable',
 };
 
 // ---------------------------------------------------------------------------
@@ -49,7 +49,7 @@ const CH = {
 // ---------------------------------------------------------------------------
 
 try {
-  contextBridge.exposeInMainWorld('refluxBridge', {
+  contextBridge.exposeInMainWorld('fluxtopBridge', {
     /** Get a persisted setting (returns a Promise). */
     getSetting: (key, defaultValue) => ipcRenderer.invoke(CH.GET_SETTING, key, defaultValue),
 
@@ -68,11 +68,11 @@ try {
     /** Disable a named plugin. */
     disablePlugin: (name) => ipcRenderer.invoke(CH.PLUGIN_DISABLE, name),
 
-    /** Reflux version string. */
+    /** Fluxtop version string. */
     version: '1.0.0',
   });
 
-  console.log('[Reflux:Preload] refluxBridge exposed.');
+  console.log('[Fluxtop:Preload] fluxtopBridge exposed.');
 } catch (err) {
-  console.error('[Reflux:Preload] Failed to expose refluxBridge:', err);
+  console.error('[Fluxtop:Preload] Failed to expose fluxtopBridge:', err);
 }

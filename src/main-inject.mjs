@@ -1,7 +1,7 @@
 /**
  * src/main-inject.mjs
  *
- * Reflux main-process bootstrap.  Injected via a prepended
+ * Fluxtop main-process bootstrap.  Injected via a prepended
  * `await import(...)` line into Fluxer's src-electron/dist/main/index.js.
  *
  * Responsibilities:
@@ -30,9 +30,9 @@ const require = createRequire(import.meta.url);
 // Paths
 // ---------------------------------------------------------------------------
 
-const REFLUX_ROOT    = nodePath.resolve(__dirname, '..');
-const RENDERER_PATH  = nodePath.join(REFLUX_ROOT, 'src', 'renderer.js');
-const PRELOAD_PATH   = nodePath.join(REFLUX_ROOT, 'src', 'preload.js');
+const FLUXTOP_ROOT    = nodePath.resolve(__dirname, '..');
+const RENDERER_PATH  = nodePath.join(FLUXTOP_ROOT, 'src', 'renderer.js');
+const PRELOAD_PATH   = nodePath.join(FLUXTOP_ROOT, 'src', 'preload.js');
 
 // ---------------------------------------------------------------------------
 // Bootstrap core modules
@@ -40,6 +40,7 @@ const PRELOAD_PATH   = nodePath.join(REFLUX_ROOT, 'src', 'preload.js');
 
 const settings      = require('./core/settings.js');
 const pluginManager = require('./core/pluginManager.js');
+const {loadPluginsWhenReady} = require('./core/pluginBootstrap.js');
 
 // Register IPC handlers immediately (before app.whenReady so handlers are in
 // place by the time any renderer tries to call them).
@@ -52,27 +53,24 @@ pluginManager.registerIpc(ipcMain, {
     let src;
     try { src = nodeFs.readFileSync(plugin.rendererSrc, 'utf8'); }
     catch (err) {
-      console.error(`[Reflux:Main] Cannot read renderer src for "${plugin.name}":`, err.message);
+      console.error(`[Fluxtop:Main] Cannot read renderer src for "${plugin.name}":`, err.message);
       return;
     }
     for (const wc of getFluxerWebContents()) {
       await wc.executeJavaScript(src).catch(e =>
-        console.error(`[Reflux:Main] Live-enable "${plugin.name}" failed:`, e.message));
+        console.error(`[Fluxtop:Main] Live-enable "${plugin.name}" failed:`, e.message));
     }
   },
 
   // Unregister a plugin from all live Fluxer tabs, calling its stop() in the renderer.
   async onRendererDisable(name) {
-    const script = `void window.__reflux?.pluginManager.unregister(${JSON.stringify(name)})`;
+    const script = `void window.__fluxtop?.pluginManager.unregister(${JSON.stringify(name)})`;
     for (const wc of getFluxerWebContents()) {
       await wc.executeJavaScript(script).catch(e =>
-        console.error(`[Reflux:Main] Live-disable "${name}" failed:`, e.message));
+        console.error(`[Fluxtop:Main] Live-disable "${name}" failed:`, e.message));
     }
   },
 });
-
-// Load and start all enabled plugins (main-process side).
-pluginManager.loadAll();
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -84,11 +82,60 @@ pluginManager.loadAll();
  * @returns {Electron.WebContents[]}
  */
 function getFluxerWebContents() {
-  return webContents.getAllWebContents().filter(wc => {
-    try { return !wc.isDestroyed() && wc.getURL().includes('web.fluxer.app'); }
-    catch { return false; }
-  });
+  return webContents.getAllWebContents().filter(isFluxerWebContents);
 }
+
+function isFluxerWebContents(wc) {
+  try {
+    if (wc.isDestroyed()) return false;
+    const url = wc.getURL();
+    return url.includes('web.fluxer.app') || url.startsWith('fluxer-app://app/');
+  } catch {
+    return false;
+  }
+}
+
+function routeFluxtopPluginsDeepLink(url) {
+  if (typeof url !== 'string') return null;
+  try {
+    const normalizedPath = url.startsWith('/');
+    const parsed = normalizedPath ? new URL(url, 'https://fluxer.app') : new URL(url);
+    let pathname = parsed.pathname.replace(/\/+$/, '') || '/';
+    if (parsed.protocol === 'fluxer:' && parsed.hostname === 'settings') pathname = `/settings${pathname}`;
+    else if (!normalizedPath && (parsed.protocol !== 'https:' || parsed.hostname !== 'fluxer.app')) return null;
+    if (pathname !== '/settings/user' || !['plugins', 'fluxtop_plugins'].includes(parsed.searchParams.get('tab'))) return null;
+    return {url: '/settings/user?tab=my_profile', openPlugins: true};
+  } catch {
+    return null;
+  }
+}
+
+async function signalFluxtopPluginsDeepLink(wc) {
+  if (!wc || wc.isDestroyed()) return;
+  const script = "window.__fluxtopPendingPluginsDeepLink = true; window.dispatchEvent(new Event('fluxtop:open-plugins-settings'));";
+  await wc.executeJavaScript(script).catch((error) =>
+    console.error('[Fluxtop:Main] Could not queue Plugins settings selection:', error.message));
+}
+
+function patchInitialDeepLinkHandler() {
+  if (ipcMain.__fluxtopInitialDeepLinkPatched) return;
+  ipcMain.__fluxtopInitialDeepLinkPatched = true;
+  const originalHandle = ipcMain.handle;
+  ipcMain.handle = function (channel, listener) {
+    if (channel !== 'get-initial-deep-link' || typeof listener !== 'function') {
+      return originalHandle.call(this, channel, listener);
+    }
+    return originalHandle.call(this, channel, async (event, ...args) => {
+      const url = await listener.call(this, event, ...args);
+      const route = routeFluxtopPluginsDeepLink(url);
+      if (!route) return url;
+      await signalFluxtopPluginsDeepLink(event.sender);
+      return route.url;
+    });
+  };
+}
+
+patchInitialDeepLinkHandler();
 
 /** Cache renderer.js contents to avoid re-reading on every new window. */
 let _rendererScript = null;
@@ -98,7 +145,7 @@ function getRendererScript() {
     _rendererScript = nodeFs.readFileSync(RENDERER_PATH, 'utf8');
     return _rendererScript;
   } catch (err) {
-    console.error('[Reflux:Main] Cannot read renderer.js:', err.message);
+    console.error('[Fluxtop:Main] Cannot read renderer.js:', err.message);
     return null;
   }
 }
@@ -114,7 +161,7 @@ async function injectAll(wc) {
   const core = getRendererScript();
   if (core) {
     await wc.executeJavaScript(core).catch(e =>
-      console.error('[Reflux:Main] renderer.js injection failed:', e.message));
+      console.error('[Fluxtop:Main] renderer.js injection failed:', e.message));
   }
 
   // 2. Per-plugin renderer scripts (if the plugin provides one).
@@ -123,9 +170,9 @@ async function injectAll(wc) {
     try {
       const src = nodeFs.readFileSync(plugin.rendererSrc, 'utf8');
       await wc.executeJavaScript(src).catch(e =>
-        console.error(`[Reflux:Main] Plugin "${plugin.name}" renderer injection failed:`, e.message));
+        console.error(`[Fluxtop:Main] Plugin "${plugin.name}" renderer injection failed:`, e.message));
     } catch (err) {
-      console.error(`[Reflux:Main] Cannot read renderer src for "${plugin.name}":`, err.message);
+      console.error(`[Fluxtop:Main] Cannot read renderer src for "${plugin.name}":`, err.message);
     }
   }
 }
@@ -161,13 +208,24 @@ function stripCsp(targetSession) {
 // ---------------------------------------------------------------------------
 
 app.on('web-contents-created', (_event, wc) => {
+  if (!wc.__fluxtopDeepLinkSendPatched && typeof wc.send === 'function') {
+    wc.__fluxtopDeepLinkSendPatched = true;
+    const send = wc.send;
+    wc.send = function (channel, ...args) {
+      const route = channel === 'deep-link' ? routeFluxtopPluginsDeepLink(args[0]) : null;
+      if (!route) return send.call(this, channel, ...args);
+      const result = send.call(this, channel, route.url, ...args.slice(1));
+      void signalFluxtopPluginsDeepLink(this);
+      return result;
+    };
+  }
   wc.on('dom-ready', () => {
-    if (!settings.get('reflux.enabled', true)) return;
+    if (!settings.get('fluxtop.enabled', true)) return;
     injectAll(wc);
   });
 });
 
-app.whenReady().then(() => {
+loadPluginsWhenReady(app, pluginManager).then(() => {
   // Register our preload via setPreloads() so it runs in the sandboxed preload
   // context without touching Fluxer's preload file.  This is the correct way
   // to inject into a sandboxed Electron preload — require() of arbitrary paths
@@ -177,11 +235,11 @@ app.whenReady().then(() => {
   stripCsp(session.defaultSession);
 
   console.log(
-    `[Reflux:Main] Ready. Settings: ${settings.SETTINGS_FILE}\n` +
-    `[Reflux:Main] Active plugins: ${pluginManager.list().filter(p => p.started).map(p => p.name).join(', ') || '(none)'}`
+    `[Fluxtop:Main] Ready. Settings: ${settings.SETTINGS_FILE}\n` +
+    `[Fluxtop:Main] Active plugins: ${pluginManager.list().filter(p => p.started).map(p => p.name).join(', ') || '(none)'}`
   );
 }).catch(err => {
-  console.error('[Reflux:Main] app.whenReady() error:', err);
+  console.error('[Fluxtop:Main] app.whenReady() error:', err);
 });
 
-console.log('[Reflux:Main] Bootstrap loaded.');
+console.log('[Fluxtop:Main] Bootstrap loaded.');

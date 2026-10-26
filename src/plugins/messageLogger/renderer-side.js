@@ -24,13 +24,13 @@
  *   "Original" block below the new content after React's update fires.
  */
 
-(function refluxMessageLogger() {
+(function fluxtopMessageLogger() {
   'use strict';
 
-  if (window.__reflux_messageLogger_loaded) return;
-  window.__reflux_messageLogger_loaded = true;
+  if (window.__fluxtop_messageLogger_loaded) return;
+  window.__fluxtop_messageLogger_loaded = true;
 
-  const TAG = '[Reflux:MessageLogger]';
+  const TAG = '[Fluxtop:MessageLogger]';
 
   /** @type {Map<string, object>} messageId → delete-event data (deleted messages only) */
   const deleteCache = new Map();
@@ -90,12 +90,12 @@
       console.log(TAG, `Deleted: "${d.content.slice(0, 100)}"`, d);
 
       const el = document.querySelector(`[data-message-id="${d.id}"]`);
-      if (el && !el.dataset.refluxDeleted) prepareDeleteGhost(el, entry);
+      if (el && !el.dataset.fluxtopDeleted) prepareDeleteGhost(el, entry);
 
     } else if (t === 'MESSAGE_UPDATE') {
       if (!d.content) return;
       const el = document.querySelector(`[data-message-id="${d.id}"]`);
-      if (!el || el.dataset.refluxEdited) return;
+      if (!el || el.dataset.fluxtopEdited) return;
 
       // Read the original content from the DOM NOW — before React patches it
       const markupEl = el.querySelector('[class*="markup"]');
@@ -112,8 +112,8 @@
   function prepareDeleteGhost(el, data) {
     // Guard: mark the live element immediately so domWatcher doesn't
     // call us again while we're waiting for React to remove the group.
-    if (el.dataset.refluxPending) return;
-    el.dataset.refluxPending = 'true';
+    if (el.dataset.fluxtopPending) return;
+    el.dataset.fluxtopPending = 'true';
 
     const group = el.parentElement;
     const list  = group?.parentElement;
@@ -141,7 +141,7 @@
 
   function buildDeleteGhost(group, el, data) {
     const ghost   = group.cloneNode(true);
-    ghost.dataset.refluxGhost = 'true';
+    ghost.dataset.fluxtopGhost = 'true';
 
     // Remove any sibling messages that aren't the deleted one
     ghost.querySelectorAll('[data-message-id]').forEach(sibling => {
@@ -149,7 +149,7 @@
     });
 
     const ghostMsg = ghost.querySelector(`[data-message-id="${data.id}"]`) || ghost;
-    ghostMsg.dataset.refluxDeleted = 'true';
+    ghostMsg.dataset.fluxtopDeleted = 'true';
     ghostMsg.style.setProperty('background',   'rgba(237,66,69,0.05)',           'important');
     ghostMsg.style.setProperty('border-left',  '2px solid rgba(237,66,69,0.38)', 'important');
     ghostMsg.style.setProperty('padding-left', '6px',                            'important');
@@ -197,7 +197,7 @@
 
   function injectOriginalBlock(el, originalText) {
     if (el.querySelector('.rx-edit-original')) return;
-    el.dataset.refluxEdited = 'true';
+    el.dataset.fluxtopEdited = 'true';
 
     const textWrap = el.querySelector('[class*="messageText"]');
     if (!textWrap) return;
@@ -293,7 +293,7 @@
       _watchTimer = null;
       for (const [id, data] of deleteCache) {
         const el = document.querySelector(`[data-message-id="${id}"]`);
-        if (el && !el.dataset.refluxDeleted && !el.dataset.refluxPending && !el.closest('[data-reflux-ghost]')) {
+        if (el && !el.dataset.fluxtopDeleted && !el.dataset.fluxtopPending && !el.closest('[data-fluxtop-ghost]')) {
           prepareDeleteGhost(el, data);
         }
       }
@@ -303,25 +303,26 @@
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
-  window.__reflux?.pluginManager?.register?.({
+  window.__fluxtop?.pluginManager?.register?.({
     name: 'messageLogger',
-    start() {},
-    stop() {
-      domWatcher.disconnect();
-      clearTimeout(_watchTimer);
-      window.WebSocket = _OrigWS;
-      JSON.parse = _origParse;
-      document.querySelectorAll('[data-reflux-ghost]').forEach(el => el.remove());
-      document.querySelectorAll('.rx-edit-original').forEach(el => el.remove());
-      document.querySelectorAll('[data-reflux-edited]').forEach(el => {
-        delete el.dataset.refluxEdited;
-      });
-      document.querySelectorAll('[data-reflux-pending]').forEach(el => {
-        delete el.dataset.refluxPending;
-      });
-      deleteCache.clear();
-      window.__reflux_messageLogger_loaded = false;
-      console.log(TAG, 'Stopped.');
+    start() {
+      return () => {
+        domWatcher.disconnect();
+        clearTimeout(_watchTimer);
+        window.WebSocket = _OrigWS;
+        JSON.parse = _origParse;
+        document.querySelectorAll('[data-fluxtop-ghost]').forEach(el => el.remove());
+        document.querySelectorAll('.rx-edit-original').forEach(el => el.remove());
+        document.querySelectorAll('[data-fluxtop-edited]').forEach(el => {
+          delete el.dataset.fluxtopEdited;
+        });
+        document.querySelectorAll('[data-fluxtop-pending]').forEach(el => {
+          delete el.dataset.fluxtopPending;
+        });
+        deleteCache.clear();
+        window.__fluxtop_messageLogger_loaded = false;
+        console.log(TAG, 'Stopped.');
+      };
     },
   });
 

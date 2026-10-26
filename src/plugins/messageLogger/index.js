@@ -3,11 +3,11 @@
 const path = require('node:path');
 
 function start() {
-  console.log('[Reflux:MessageLogger] Started (renderer script will be injected).');
+  console.log('[Fluxtop:MessageLogger] Started (renderer script will be injected).');
 }
 
 function stop() {
-  console.log('[Reflux:MessageLogger] Stopped.');
+  console.log('[Fluxtop:MessageLogger] Stopped.');
 }
 
 module.exports = {

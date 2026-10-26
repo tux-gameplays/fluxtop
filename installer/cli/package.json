@@ -1,11 +1,11 @@
 {
-  "name": "reflux-installer",
+  "name": "fluxtop-installer",
   "version": "1.0.0",
-  "description": "Reflux installer/uninstaller for the Fluxer desktop app",
+  "description": "Fluxtop installer/uninstaller for the Fluxer desktop app",
   "private": true,
   "scripts": {
-    "install-reflux":   "node index.js",
-    "uninstall-reflux": "node unpatch.js"
+    "install-fluxtop":   "node index.js",
+    "uninstall-fluxtop": "node unpatch.js"
   },
   "dependencies": {
     "@electron/asar": "^3.2.13"

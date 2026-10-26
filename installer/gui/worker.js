@@ -6,20 +6,17 @@ const fs = require('node:fs');
 const https = require('node:https');
 const http = require('node:http');
 const os = require('node:os');
-const {execSync} = require('node:child_process');
 const asar = require('@electron/asar');
 const {pathToFileURL} = require('node:url');
+const extractZip = require('extract-zip');
+const {FLUXTOP_MARKER, MAIN_ENTRY_CANDIDATES, findMainEntry, runtimeSourceDir, validateTarget} = require('./worker-platform.js');
 
 process.noAsar = true;
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
-const ASAR_MAIN_ENTRY = 'src-electron/dist/main/index.js';
-const ASAR_PRELOAD_ENTRY = 'src-electron/dist/preload/index.js';
-const GITHUB_REPO = 'its3rr0rswrld/Reflux';
-
-const APPDATA = process.env.APPDATA || path.join(process.env.USERPROFILE || '', 'AppData', 'Roaming');
-const REFLUX_APPDATA_SRC = path.join(APPDATA, 'Reflux', 'src');
+const GITHUB_REPO = 'tux-gameplays/fluxtop';
+const RUNTIME_SRC_DIR = runtimeSourceDir();
 
 // ── Inputs ────────────────────────────────────────────────────────────────────
 
@@ -61,10 +58,10 @@ function download(url, dest) {
 }
 
 async function downloadSrc() {
-	const url = `https://github.com/${GITHUB_REPO}/releases/latest/download/reflux-src.zip`;
-	const tmpZip = path.join(os.tmpdir(), `reflux-src-${Date.now()}.zip`);
+	const url = `https://github.com/${GITHUB_REPO}/releases/latest/download/fluxtop-src.zip`;
+	const tmpZip = path.join(os.tmpdir(), `fluxtop-src-${Date.now()}.zip`);
 
-	send('step', `Downloading Reflux runtime from GitHub…`);
+	send('step', `Downloading Fluxtop runtime from GitHub…`);
 	await download(url, tmpZip);
 
 	const zipSize = fs.statSync(tmpZip).size;
@@ -74,21 +71,20 @@ async function downloadSrc() {
 	}
 	send('step', `Downloaded ${(zipSize / 1024).toFixed(1)} KB. Extracting…`);
 
-	if (fs.existsSync(REFLUX_APPDATA_SRC)) fs.rmSync(REFLUX_APPDATA_SRC, {recursive: true});
-	fs.mkdirSync(REFLUX_APPDATA_SRC, {recursive: true});
+	if (fs.existsSync(RUNTIME_SRC_DIR)) fs.rmSync(RUNTIME_SRC_DIR, {recursive: true});
+	fs.mkdirSync(RUNTIME_SRC_DIR, {recursive: true});
+	try {
+		await extractZip(tmpZip, {dir: RUNTIME_SRC_DIR});
+	} finally {
+		if (fs.existsSync(tmpZip)) fs.unlinkSync(tmpZip);
+	}
 
-	execSync(
-		`powershell -NonInteractive -Command "Expand-Archive -LiteralPath '${tmpZip}' -DestinationPath '${REFLUX_APPDATA_SRC}' -Force"`,
-		{stdio: 'pipe'},
-	);
-	fs.unlinkSync(tmpZip);
-
-	return REFLUX_APPDATA_SRC;
+	return RUNTIME_SRC_DIR;
 }
 
-async function getRefluxSrc() {
+async function getFluxtopSrc() {
 	if (!isPackaged) {
-		send('step', 'Using local Reflux source (dev mode)…');
+		send('step', 'Using local Fluxtop source (dev mode)…');
 		return devSrc;
 	}
 	return await downloadSrc();
@@ -118,38 +114,8 @@ function pickleString(str) {
 
 // ── Asar header helpers ───────────────────────────────────────────────────────
 
-function getAsarEntry(files, entryPath) {
-	const parts = entryPath.split('/');
-	let node = files;
-	for (let i = 0; i < parts.length; i++) {
-		const child = node[parts[i]];
-		if (!child) return null;
-		if (i === parts.length - 1) return child;
-		if (!child.files) return null;
-		node = child.files;
-	}
-	return null;
-}
-
 function findMainEntryInAsar(asarPath) {
-	const {header} = asar.readHeader(asarPath);
-
-	try {
-		const pkg = JSON.parse(asar.extractFile(asarPath, 'package.json').toString('utf8'));
-		if (pkg.main) {
-			const candidate = pkg.main.replace(/^\.\//, '');
-			if (getAsarEntry(header.files, candidate)) return candidate;
-		}
-	} catch {
-		/* no package.json or unreadable */
-	}
-
-	const candidates = [ASAR_MAIN_ENTRY, 'dist/main/index.js', 'app/dist/main/index.js', 'main/index.js', 'main.js', 'index.js'];
-	for (const c of candidates) {
-		if (getAsarEntry(header.files, c)) return c;
-	}
-
-	throw new Error(`Main entry not found in asar. Tried: ${candidates.join(', ')}`);
+	return findMainEntry(asarPath, asar);
 }
 
 // ── Streaming asar patch ──────────────────────────────────────────────────────
@@ -157,14 +123,16 @@ function findMainEntryInAsar(asarPath) {
 // Reads the asar once and writes a new one, splicing in the patched file.
 
 function patchAsarEntry(asarPath, entryPath, patchLine) {
-	const {header, headerSize} = asar.readHeader(asarPath);
+	const {header, headerSize} = asar.getRawHeader(asarPath);
 	const dataStart = 8 + headerSize; // 8 bytes for the size pickle
 
-	const entry = getAsarEntry(header.files, entryPath);
-	if (!entry || entry.files) throw new Error(`Entry '${entryPath}' not found`);
+	const entry = header.files;
+	let target = entry;
+	for (const part of entryPath.split('/')) target = target?.[part]?.files || target?.[part];
+	if (!target || target.files) throw new Error(`Entry '${entryPath}' not found`);
 
-	const oldOffset = Number(entry.offset);
-	const oldSize = entry.size;
+	const oldOffset = Number(target.offset);
+	const oldSize = target.size;
 
 	// Read original content
 	const rfd = fs.openSync(asarPath, 'r');
@@ -173,15 +141,15 @@ function patchAsarEntry(asarPath, entryPath, patchLine) {
 	fs.closeSync(rfd);
 
 	const originalStr = originalBuf.toString('utf8');
-	if (originalStr.startsWith(patchLine)) return false; // already patched
+	if (originalStr.includes(FLUXTOP_MARKER)) return false; // already patched
 
 	// Build patched content
 	const patchedBuf = Buffer.from(patchLine + '\n' + originalStr, 'utf8');
 	const sizeDelta = patchedBuf.length - oldSize;
 
 	// Update header: fix entry size/integrity, shift subsequent offsets
-	entry.size = patchedBuf.length;
-	delete entry.integrity; // content changed — stale hash
+	target.size = patchedBuf.length;
+	delete target.integrity; // content changed — stale hash
 
 	if (sizeDelta !== 0) {
 		(function adjustOffsets(files) {
@@ -200,7 +168,7 @@ function patchAsarEntry(asarPath, entryPath, patchLine) {
 	const newSizeBuf = pickleUInt32(newHeaderBuf.length);
 
 	// Stream: new header + original data with patched section spliced in
-	const tmpPath = asarPath + '.reflux-patch';
+	const tmpPath = asarPath + '.fluxtop-patch';
 	const wfd = fs.openSync(tmpPath, 'w');
 	try {
 		fs.writeSync(wfd, newSizeBuf);
@@ -246,39 +214,35 @@ function patchAsarEntry(asarPath, entryPath, patchLine) {
 
 // ── Install / Repair ───────────────────────────────────────────────────────────
 
-async function runInstall(asarPath) {
+async function runInstall(asarPath, replaceLegacy = false) {
 	const bakPath = asarPath + '.bak';
-	const unpackedDir = asarPath + '.unpacked';
 	const resourcesDir = path.dirname(asarPath);
-
-	const activeSrc = await getRefluxSrc();
-	const REFLUX_MAIN = path.join(activeSrc, 'main-inject.mjs');
-	const REFLUX_PRELOAD = path.join(activeSrc, 'preload.js');
+	const validation = validateTarget(asarPath, {fsImpl: fs, asarLib: asar});
+	if (validation.legacyInstalled && !replaceLegacy) {
+		throw new Error('Replacing the existing Reflux injection requires explicit confirmation.');
+	}
+	const activeSrc = await getFluxtopSrc();
+	const fluxtopMain = path.join(activeSrc, 'main-inject.mjs');
+	if (validation.legacyInstalled) {
+		fs.copyFileSync(bakPath, asarPath);
+		asar.uncache?.(asarPath);
+		send('step', 'Restored the original archive from the existing backup; preserving that backup.');
+	}
 
 	send('step', 'Backing up app.asar…');
 	if (!fs.existsSync(bakPath)) {
 		fs.copyFileSync(asarPath, bakPath);
 	} else {
-		send('warn', 'Backup already exists — skipping.');
+		if (!validation.installed && !(validation.legacyInstalled && replaceLegacy)) throw new Error('A backup exists but the selected archive is not marked as Fluxtop; refusing to modify it.');
+		send('warn', 'Verified Fluxtop backup already exists — skipping.');
 	}
 
-	// Clean up any legacy preload injection from an older install approach
-	const unpackedPreload = path.join(unpackedDir, ASAR_PRELOAD_ENTRY);
-	if (fs.existsSync(unpackedPreload)) {
-		const oldLine = `require(${JSON.stringify(REFLUX_PRELOAD.replace(/\\/g, '/'))});\n`;
-		const contents = fs.readFileSync(unpackedPreload, 'utf8');
-		if (contents.startsWith(oldLine)) {
-			fs.writeFileSync(unpackedPreload, contents.slice(oldLine.length), 'utf8');
-			send('warn', 'Removed legacy preload injection.');
-		}
-	}
-
-	const mainInjectLine = `await import(${JSON.stringify(pathToFileURL(REFLUX_MAIN).href)});`;
+	const mainInjectLine = `${FLUXTOP_MARKER}\nawait import(${JSON.stringify(pathToFileURL(fluxtopMain).href)});`;
 
 	send('step', 'Patching app.asar…');
 	let patched;
 	try {
-		const mainEntry = findMainEntryInAsar(asarPath);
+		const mainEntry = validation.entry;
 		patched = patchAsarEntry(asarPath, mainEntry, mainInjectLine);
 	} catch (err) {
 		// Streaming patch failed — fall back to full extract+repack
@@ -288,19 +252,19 @@ async function runInstall(asarPath) {
 
 	if (!patched) send('warn', 'Already patched — no changes made.');
 
-	complete(true, 'Reflux installed successfully. Restart Fluxer to activate.');
+	complete(true, 'Fluxtop installed successfully. Restart Fluxer to activate.');
 }
 
 // Full extract+repack fallback for when the streaming patch can't be used.
 async function runInstallFull(asarPath, resourcesDir, mainInjectLine) {
-	const extractDir = path.join(resourcesDir, '.reflux-extract');
+	const extractDir = path.join(resourcesDir, '.fluxtop-extract');
 	if (fs.existsSync(extractDir)) fs.rmSync(extractDir, {recursive: true});
 
 	send('step', 'Extracting asar…');
 	asar.extractAll(asarPath, extractDir);
 
 	send('step', 'Locating main entry…');
-	const candidates = [ASAR_MAIN_ENTRY, 'dist/main/index.js', 'app/dist/main/index.js', 'main/index.js', 'main.js', 'index.js'];
+	const candidates = MAIN_ENTRY_CANDIDATES;
 	let mainEntryPath = null;
 	for (const c of candidates) {
 		const p = path.join(extractDir, ...c.split('/'));
@@ -312,7 +276,7 @@ async function runInstallFull(asarPath, resourcesDir, mainInjectLine) {
 	if (!mainEntryPath) throw new Error(`Main entry not found. Tried: ${candidates.join(', ')}`);
 
 	const contents = fs.readFileSync(mainEntryPath, 'utf8');
-	if (contents.startsWith(mainInjectLine)) {
+	if (contents.includes(FLUXTOP_MARKER)) {
 		fs.rmSync(extractDir, {recursive: true});
 		return false;
 	}
@@ -338,14 +302,14 @@ async function runUpdate() {
 	// user can see exactly what version was applied.
 	let newVersion = null;
 	try {
-		const preloadSrc = fs.readFileSync(path.join(REFLUX_APPDATA_SRC, 'preload.js'), 'utf8');
+		const preloadSrc = fs.readFileSync(path.join(RUNTIME_SRC_DIR, 'preload.js'), 'utf8');
 		const m = preloadSrc.match(/version:\s*'([^']+)'/);
 		if (m) newVersion = m[1];
 	} catch { /* non-fatal */ }
 
 	const msg = newVersion
-		? `Updated to Reflux v${newVersion}. Restart Fluxer to apply.`
-		: 'Reflux runtime updated. Restart Fluxer to apply.';
+		? `Updated to Fluxtop v${newVersion}. Restart Fluxer to apply.`
+		: 'Fluxtop runtime updated. Restart Fluxer to apply.';
 	complete(true, msg);
 }
 
@@ -353,41 +317,30 @@ async function runUpdate() {
 
 function runUninstall(asarPath) {
 	const bakPath = asarPath + '.bak';
-	const unpackedDir = asarPath + '.unpacked';
 	const resourcesDir = path.dirname(asarPath);
-	const REFLUX_PRELOAD = path.join(REFLUX_APPDATA_SRC, 'preload.js');
+	const validation = validateTarget(asarPath, {fsImpl: fs, asarLib: asar});
 
 	send('step', 'Restoring original asar…');
-	if (!fs.existsSync(bakPath)) throw new Error('Backup not found. Cannot restore.');
+	if (!validation.installed || !fs.existsSync(bakPath)) throw new Error('No marker-verified Fluxtop backup found. Cannot restore.');
 	fs.copyFileSync(bakPath, asarPath);
 
 	send('step', 'Removing backup…');
 	fs.unlinkSync(bakPath);
 
-	const unpackedPreload = path.join(unpackedDir, ASAR_PRELOAD_ENTRY);
-	if (fs.existsSync(unpackedPreload)) {
-		const oldLine = `require(${JSON.stringify(REFLUX_PRELOAD.replace(/\\/g, '/'))});\n`;
-		const contents = fs.readFileSync(unpackedPreload, 'utf8');
-		if (contents.startsWith(oldLine)) {
-			fs.writeFileSync(unpackedPreload, contents.slice(oldLine.length), 'utf8');
-			send('warn', 'Removed legacy preload injection.');
-		}
-	}
-
 	send('step', 'Cleaning up temp files…');
-	for (const suffix of ['.reflux-extract', '.reflux-tmp', '.reflux-full-extract', '.reflux-patch']) {
+	for (const suffix of ['.fluxtop-extract', '.fluxtop-tmp', '.fluxtop-full-extract', '.fluxtop-patch']) {
 		const p = path.join(resourcesDir, suffix);
 		if (fs.existsSync(p)) fs.rmSync(p, {recursive: true, force: true});
 	}
 
-	complete(true, 'Reflux uninstalled successfully. Restart Fluxer to apply.');
+	complete(true, 'Fluxtop uninstalled successfully. Restart Fluxer to apply.');
 }
 
 // ── Entry ─────────────────────────────────────────────────────────────────────
 
 (async () => {
 	try {
-		if (op === 'install') await runInstall(asarPath);
+		if (op === 'install') await runInstall(asarPath, workerData.replaceLegacy === true);
 		else if (op === 'update') await runUpdate();
 		else if (op === 'uninstall') runUninstall(asarPath);
 		else complete(false, `Unknown op: ${op}`);

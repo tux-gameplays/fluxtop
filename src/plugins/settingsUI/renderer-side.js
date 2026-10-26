@@ -1,648 +1,573 @@
-/**
- * src/plugins/settingsUI/renderer-side.js
- *
- * Injects a "Reflux" section into Fluxer's settings sidebar.
- *
- * Panel rendering strategy
- * ─────────────────────────
- * We discover every CSS class name by reading them off existing live DOM
- * elements (resilient to hash changes between Fluxer builds), then build
- * our panel using the *exact* same HTML structure Fluxer uses.
- *
- * To avoid breaking React's reconciler we never touch the real tabpanel.
- * Instead we insert our panel as a sibling, and simply toggle display:none
- * on the real tabpanel while ours is active. React keeps rendering into
- * its (hidden) div normally.
- *
- * Imported plugins
- * ────────────────
- * Stored in settings at `reflux.importedPlugins`. Supports a Tampermonkey-
- * style metadata block at the top of each file:
- *   // ==RefluxPlugin==
- *   // @name        My Plugin
- *   // @author      Brady
- *   // @description Does cool stuff
- *   // @version     1.0.0
- *   // @preview     https://i.imgur.com/abc.png
- *   // ==/RefluxPlugin==
- */
-
-(function refluxSettingsUI() {
+/** React-native Fluxtop Plugins settings tab for Fluxer Desktop. */
+(function fluxtopSettingsUI() {
   'use strict';
 
-  if (window.__reflux_settingsUI_loaded) return;
-  window.__reflux_settingsUI_loaded = true;
+  if (window.__fluxtop_settingsUI_loaded) return;
+  window.__fluxtop_settingsUI_loaded = true;
 
-  // ─── SVG paths ────────────────────────────────────────────────────────────
-  const SVG_PLUG   = 'M229.66,26.34a8,8,0,0,0-11.32,0L160,84.69l-5.38-5.38a32.05,32.05,0,0,0-45.25,0L96,92.69,82.34,79A8,8,0,0,0,71,90.34L84.69,104,48,140.69a32,32,0,0,0,0,45.26L57.37,195,26.34,226.06a8,8,0,0,0,11.32,11.32L68.69,206.63l9.37,9.38a32,32,0,0,0,45.26,0L160,179.32l13.66,13.65a8,8,0,0,0,11.32-11.31L171.32,168l13.37-13.38a32,32,0,0,0,0-45.25l-5.38-5.38,58.35-58.34A8,8,0,0,0,229.66,26.34ZM91.32,204.69a16,16,0,0,1-22.63,0L31.32,167.32a16,16,0,0,1,0-22.63L88,108l60,60Zm82.05-60.06L160,158l-62-62,13.38-13.37a16,16,0,0,1,22.62,0l49.38,49.37A16,16,0,0,1,173.37,144.63Z';
-  const SVG_UPLOAD = 'M224,144v64a8,8,0,0,1-8,8H40a8,8,0,0,1-8-8V144a8,8,0,0,1,16,0v56H208V144a8,8,0,0,1,16,0ZM93.66,77.66,120,51.31V144a8,8,0,0,0,16,0V51.31l26.34,26.35a8,8,0,0,0,11.32-11.32l-40-40a8,8,0,0,0-11.32,0l-40,40A8,8,0,0,0,93.66,77.66Z';
-  const SVG_TRASH  = 'M216,48H176V40a24,24,0,0,0-24-24H104A24,24,0,0,0,80,40v8H40a8,8,0,0,0,0,16h8V208a16,16,0,0,0,16,16H192a16,16,0,0,0,16-16V64h8a8,8,0,0,0,0-16ZM96,40a8,8,0,0,1,8-8h48a8,8,0,0,1,8,8v8H96Zm96,168H64V64H192ZM112,104v64a8,8,0,0,1-16,0V104a8,8,0,0,1,16,0Zm48,0v64a8,8,0,0,1-16,0V104a8,8,0,0,1,16,0Z';
-  const SVG_PUZZLE = 'M223.07,111.06l-32-16A8,8,0,0,0,180,102.46V120H160V102.46a8,8,0,0,0-11.07-7.4l-32,16a8,8,0,0,0,0,14.88L144,136.2V160H128a8,8,0,0,0,0,16h16v23.8l-27.07,10.74a8,8,0,0,0,0,14.88l32,16A8,8,0,0,0,160,224V206.54a8,8,0,0,0,11.07,7.4l32-16a8,8,0,0,0,0-14.88L176,172.72V160h16a8,8,0,0,0,0-16H176V136.2l27.07-10.26a8,8,0,0,0,0-14.88ZM160,64V48a8,8,0,0,0-16,0V64a8,8,0,0,0,16,0ZM88,160H64a8,8,0,0,0,0,16H88a8,8,0,0,0,0-16Zm144-64H216a8,8,0,0,0,0,16h16a8,8,0,0,0,0-16ZM40,96H56a8,8,0,0,0,0-16H40a8,8,0,0,0,0,16Zm48-32A8,8,0,0,0,99.31,58.34l-32,32a8,8,0,0,0,11.32,11.32l32-32A8,8,0,0,0,88,64Zm128,128a8,8,0,0,0-11.32,0l-32,32a8,8,0,0,0,11.32,11.32l32-32A8,8,0,0,0,216,192ZM88,192a8,8,0,0,0-11.32,0l-32,32a8,8,0,0,0,11.32,11.32l32-32A8,8,0,0,0,88,192Z';
+  const TAB_TYPE = 'fluxtop_plugins';
+  const PATCH_MARKER = Symbol.for('fluxtop.reactSettingsTabPatch');
+  const STORAGE_KEY = 'fluxtop.importedPlugins';
+  const PLUGINS_URL = 'fluxer://settings/user?tab=plugins';
+  const SVG_PLUG = 'M25.6,25.6,22.2,29,19,25.8l3.4-3.4a2,2,0,0,0-2.8-2.8L16.2,23l-1.3-1.3a1.9,1.9,0,0,0-2.8,0l-3,3a9.8,9.8,0,0,0-3,7,9.1,9.1,0,0,0,1.8,5.6L4.6,40.6a1.9,1.9,0,0,0,0,2.8,1.9,1.9,0,0,0,2.8,0l3.2-3.2a10.1,10.1,0,0,0,5.9,1.9,10.2,10.2,0,0,0,7.1-2.9l3-3a2,2,0,0,0,.6-1.4,1.7,1.7,0,0,0-.6-1.4L25,31.8l3.4-3.4a2,2,0,0,0-2.8-2.8Z M43.4,4.6a1.9,1.9,0,0,0-2.8,0L37.2,8a10,10,0,0,0-13,.9l-3,3a2,2,0,0,0-.6,1.4,1.7,1.7,0,0,0,.6,1.4L32.9,26.4a1.9,1.9,0,0,0,2.8,0l3-2.9a9.9,9.9,0,0,0,2.9-7.1A10.4,10.4,0,0,0,40,10.9l3.4-3.5A1.9,1.9,0,0,0,43.4,4.6Z';
+  const styles = {
+    root: {padding: '24px 32px', color: 'var(--text-normal, #dbdee1)', maxWidth: 900},
+    header: {display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24},
+    title: {fontSize: 20, fontWeight: 700, margin: 0},
+    section: {marginBottom: 30},
+    sectionTitle: {fontSize: 16, fontWeight: 650, margin: '0 0 4px'},
+    hint: {fontSize: 13, color: 'var(--text-muted, #949ba4)', margin: '0 0 12px'},
+    row: {display: 'flex', alignItems: 'center', gap: 12, padding: '12px 0', borderBottom: '1px solid var(--background-modifier-accent, rgba(255,255,255,.06))'},
+    fluxtopRow: {marginBottom: 14, paddingBottom: 20},
+    icon: {width: 36, height: 36, flex: '0 0 36px', display: 'grid', placeItems: 'center', borderRadius: 8, background: 'var(--background-tertiary, #2b2d31)', overflow: 'hidden'},
+    info: {flex: 1, minWidth: 0},
+    name: {fontSize: 14, fontWeight: 600, margin: 0},
+    meta: {fontSize: 12, color: 'var(--text-muted, #949ba4)', margin: '3px 0'},
+    description: {fontSize: 13, color: 'var(--text-muted, #949ba4)', margin: 0, overflow: 'hidden', textOverflow: 'ellipsis'},
+    button: {display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 6, width: 'fit-content', minWidth: 72,
+      maxWidth: '100%', height: 36, minHeight: 36, padding: '7px 12px', fontSize: 13, fontWeight: 600, lineHeight: '18px',
+      border: '.0625rem solid color-mix(in srgb, var(--brand-primary) 82%, white 18%)', borderRadius: 8,
+      background: 'var(--brand-primary)', color: 'var(--brand-primary-fill)', cursor: 'pointer',
+      transition: 'background-color .12s,border-color .12s,box-shadow .12s,color .12s,opacity .12s', position: 'relative', overflow: 'hidden'},
+    remove: {border: 0, background: 'transparent', color: 'var(--status-danger, #ed4245)', cursor: 'pointer', fontSize: 18},
+    toggle: {width: 44, height: 24, border: 0, borderRadius: 999, position: 'relative', display: 'inline-flex', alignItems: 'center', padding: 2, flex: '0 0 auto'},
+    thumb: {position: 'absolute', width: 20, height: 20, top: 2, left: 0, borderRadius: '50%', background: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'center'},
+    iconSvg: {width: 20, height: 20, fill: 'currentColor'},
+  };
 
-  function svgEl(path, w = 20, h = 20, extraStyle = '') {
-    return `<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}" fill="currentColor" viewBox="0 0 256 256"${extraStyle ? ` style="${extraStyle}"` : ''}><path d="${path}"></path></svg>`;
+  function uid() { return `_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`; }
+  function pluginToggleLog(name, enabled) { return `Plugin "${name}" ${enabled ? 'enabled' : 'disabled'}.`; }
+  function getSwitchVisualState(checked, disabled) {
+    return {
+      trackColor: checked ? 'var(--brand-primary)' : '#6b7280',
+      iconColor: checked ? 'var(--brand-primary)' : '#6b7280',
+      thumbOffset: checked ? 22 : 2,
+      iconSize: checked ? 12 : 10,
+      iconPath: checked ? 'M232.49,80.49l-128,128a12,12,0,0,1-17,0l-56-56a12,12,0,1,1,17-17L96,183,215.51,63.51a12,12,0,0,1,17,17Z' :
+        'M208.49,191.51a12,12,0,0,1-17,17L128,145,64.49,208.49a12,12,0,0,1-17-17L111,128,47.51,64.49a12,12,0,0,1,17-17L128,111l63.51-63.52a12,12,0,0,1,17,17L145,128Z',
+      opacity: disabled ? 0.5 : 1,
+      cursor: disabled ? 'not-allowed' : 'pointer',
+      trackTransition: 'color 150ms cubic-bezier(.4,0,.2,1), background-color 150ms cubic-bezier(.4,0,.2,1), border-color 150ms cubic-bezier(.4,0,.2,1), box-shadow 150ms cubic-bezier(.4,0,.2,1)',
+      thumbTransition: 'transform 150ms cubic-bezier(.4,0,.2,1), box-shadow 150ms cubic-bezier(.4,0,.2,1)',
+      trackShadow: checked ? 'inset 0 2px 4px rgba(0,0,0,.1), 0 1px rgba(255,255,255,.15)' :
+        'inset 0 2px 4px rgba(0,0,0,.15), 0 1px rgba(255,255,255,.1)',
+    };
   }
-
-  /**
-   * Renders a plugin icon from three accepted formats:
-   *   - Raw SVG string  (<svg …>)
-   *   - Image URL       (https://… or data:…)
-   *   - Emoji / text    (anything else — short string)
-   * Falls back to the generic puzzle SVG when icon is falsy.
-   */
-  function renderIcon(icon) {
-    if (!icon) return svgEl(SVG_PUZZLE, 18, 18);
-    const s = String(icon).trim();
-    if (/^<svg/i.test(s)) return s;
-    if (/^(https?:|data:)/i.test(s)) {
-      return `<img src="${esc(s)}" width="22" height="22" style="object-fit:contain;border-radius:4px;" alt="" onerror="this.replaceWith(document.createRange().createContextualFragment('${svgEl(SVG_PUZZLE, 18, 18).replace(/'/g, "\\'")}'))">`;
+  function createPluginViewModel(builtins, imported) {
+    return [
+      ...(builtins || []).map((plugin) => ({plugin: plugin.name === 'settingsUI' ?
+        {...plugin, displayName: 'Fluxtop', enabled: true, disableable: false} : plugin, imported: false})),
+      ...(imported || []).map((plugin) => ({plugin, imported: true})),
+    ].sort((a, b) => Number(b.plugin.disableable === false) - Number(a.plugin.disableable === false));
+  }
+  function removeImportedPluginById(plugins, id) {
+    return (plugins || []).filter((plugin) => plugin.id !== id);
+  }
+  function parseMetadata(source, filename) {
+    const metadata = {name: filename.replace(/\.js$/i, ''), description: '', author: '', version: '', preview: '', icon: ''};
+    const block = source.match(/\/\/\s*==FluxtopPlugin==([\s\S]*?)\/\/\s*==\/FluxtopPlugin==/i);
+    if (block) for (const line of block[1].split('\n')) {
+      const match = line.match(/\/\/\s*@([\w]+)\s+(.*)/);
+      if (match && Object.hasOwn(metadata, match[1])) metadata[match[1]] = match[2].trim();
     }
-    // Emoji or short text
-    return `<span style="font-size:20px;line-height:1;user-select:none;">${esc(s)}</span>`;
+    return metadata;
   }
-
-  // ─── Utility ──────────────────────────────────────────────────────────────
-  function esc(s) {
-    return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  function parsePluginSvgIcon(icon, parseDocument) {
+    try {
+      const root = (parseDocument || ((source) => new DOMParser().parseFromString(source, 'image/svg+xml')))(String(icon)).documentElement;
+      if (root.localName !== 'svg') return null;
+      const paths = Array.from(root.querySelectorAll('path')).map((path) => path.getAttribute('d')).filter(Boolean);
+      if (!paths.length) return null;
+      return {viewBox: root.getAttribute('viewBox') || '0 0 256 256', width: root.getAttribute('width'),
+        height: root.getAttribute('height'), paths};
+    } catch { return null; }
   }
-  function uid() { return '_' + Math.random().toString(36).slice(2) + Date.now().toString(36); }
-
-  // ─── Class discovery ──────────────────────────────────────────────────────
-  function discoverClasses() {
-    const panel = document.querySelector('[role="tabpanel"]');
-    if (!panel) return null;
-
-    function pickAll(el) { return el ? Array.from(el.classList).join(' ') : ''; }
-
-    const pad        = panel.querySelector('div');
-    const card       = pad?.querySelector('div');
-    const header     = panel.querySelector('[class*="desktopHeader"]');
-    const titleCont  = panel.querySelector('[class*="titleContent"]');
-    const h1         = panel.querySelector('h1');
-    const scrollWrap = panel.querySelector('[class*="scrollerWrap"]');
-    const scroller   = panel.querySelector('[data-settings-scroll-container]');
-    const scrollCh   = scroller?.firstElementChild;
-    const spacerTop  = scrollCh?.querySelector('[class*="ScrollSpacerTop"]');
-    const scrollInner= scrollCh?.querySelector('[class*="desktopScrollInner"]');
-    const spacerBot  = scrollCh?.querySelector('[class*="ScrollSpacerBottom"]');
-    const tabCont    = scrollInner?.firstElementChild;
-    const subsec     = tabCont?.firstElementChild;
-    const subsecHdr  = subsec?.querySelector('[class*="subsectionHeader"]');
-    const subsecTitle= subsecHdr?.querySelector('h4');
-    const subsecDesc = subsecHdr?.querySelector('p');
-    const subsecCont = subsec?.querySelector('[class*="subsectionContent"]');
-    const trackEl    = panel.querySelector('[class*="ScrollerTrack"][class*="track"]');
-    const thumbEl    = trackEl?.querySelector('[class*="thumb"]');
-
-    return {
-      desktopContent:    pickAll(panel),
-      desktopContentPad: pickAll(pad),
-      desktopContentCard:pickAll(card),
-      desktopHeader:     pickAll(header),
-      titleContent:      pickAll(titleCont),
-      title:             pickAll(h1),
-      scrollerWrap:      pickAll(scrollWrap),
-      scroller:          pickAll(scroller),
-      scrollerChildren:  pickAll(scrollCh),
-      spacerTop:         pickAll(spacerTop),
-      scrollInner:       pickAll(scrollInner),
-      spacerBot:         pickAll(spacerBot),
-      tabContainer:      pickAll(tabCont),
-      subsection:        pickAll(subsec),
-      subsectionHeader:  pickAll(subsecHdr),
-      subsectionTitle:   pickAll(subsecTitle),
-      subsectionDesc:    pickAll(subsecDesc),
-      subsectionContent: pickAll(subsecCont),
-      scrollTrack:       pickAll(trackEl),
-      scrollTrackThumb:  pickAll(thumbEl),
-      // sidebar (filled in by discoverSidebarClasses)
-      cat: '', catTitle: '', item: '', itemIcon: '', itemLabel: '', tabLabel: '',
-    };
+  function runPlugin(source) {
+    try { new Function(source)(); }
+    catch (error) { console.error('[Fluxtop:SettingsUI] Plugin runtime error:', error); }
   }
-
-  function discoverSidebarClasses(devSection) {
-    function pick(el) { return el ? Array.from(el.classList).join(' ') : ''; }
-    const btn  = devSection.querySelector('button');
-    const svgE = btn?.querySelector('svg');
-    const span = btn?.querySelector('span');
-    const inner= btn?.querySelector('span > div');
-    return {
-      cat:      pick(devSection),
-      catTitle: pick(devSection.querySelector('h2')),
-      item:     pick(btn),
-      itemIcon: pick(svgE),
-      itemLabel:pick(span),
-      tabLabel: pick(inner),
-    };
-  }
-
-  // ─── Sidebar highlight override ───────────────────────────────────────────
-  // Injected while our panel is active so the previously-selected Fluxer tab
-  // loses its highlight and our button gains it.
-  let _styleTag = null;
-
-  function injectActiveStyle() {
-    if (_styleTag) return;
-    _styleTag = document.createElement('style');
-    _styleTag.id = 'reflux-active-style';
-    // Suppress highlight on all non-Reflux sidebar tabs
-    _styleTag.textContent = `
-      [class*="sidebarCategory"]:not(#reflux-sidebar-section) [role="tab"][aria-selected="true"],
-      [class*="sidebarCategory"]:not(#reflux-sidebar-section) [role="tab"][data-selected="true"] {
-        background: transparent !important;
-        color: var(--interactive-normal, #b9bbbe) !important;
-      }
-      [class*="sidebarCategory"]:not(#reflux-sidebar-section) [role="tab"][aria-selected="true"] > * {
-        opacity: 0.6 !important;
-      }
-      #reflux-tab-plugins {
-        background: var(--background-modifier-selected, rgba(255,255,255,0.1)) !important;
-        color: var(--interactive-active, #fff) !important;
-      }
-    `;
-    document.head.appendChild(_styleTag);
-  }
-
-  function removeActiveStyle() {
-    _styleTag?.remove();
-    _styleTag = null;
-  }
-
-  // ─── Imported plugin storage ───────────────────────────────────────────────
   async function getImported() {
-    try { return await window.refluxBridge?.getSetting('reflux.importedPlugins', []) ?? []; }
+    try { return await window.fluxtopBridge?.getSetting(STORAGE_KEY, []) ?? []; }
     catch { return []; }
   }
-  async function saveImported(list) {
-    try { await window.refluxBridge?.setSetting('reflux.importedPlugins', list); }
-    catch (e) { console.error('[Reflux:SettingsUI] save failed', e); }
+  async function saveImported(plugins) {
+    try { await window.fluxtopBridge?.setSetting(STORAGE_KEY, plugins); }
+    catch (error) { console.error('[Fluxtop:SettingsUI] save failed', error); throw error; }
   }
-
-  function parseMetadata(src, filename) {
-    const meta = { name: filename.replace(/\.js$/i,''), description: '', author: '', version: '', preview: '', icon: '' };
-    const block = src.match(/\/\/\s*==RefluxPlugin==([\s\S]*?)\/\/\s*==\/RefluxPlugin==/i);
-    if (block) {
-      for (const line of block[1].split('\n')) {
-        const m = line.match(/\/\/\s*@(\w+)\s+(.*)/);
-        if (m && m[1] in meta) meta[m[1]] = m[2].trim();
-      }
-    }
-    return meta;
+  function appendFluxtopSettingsTab(tabs, descriptor) {
+    if (!Array.isArray(tabs) || tabs.some((tab) => tab.type === descriptor.type)) return tabs;
+    return [...tabs, descriptor];
   }
-
-  function runPlugin(src) {
-    try { new Function(src)(); }
-    catch (e) { console.error('[Reflux:SettingsUI] Plugin runtime error:', e); }
-  }
-
-  getImported().then(list => list.filter(p => p.enabled !== false).forEach(p => runPlugin(p.source)));
-
-  // ─── Plugin card component ─────────────────────────────────────────────────
-  // Uses inline styles + CSS vars — zero dependency on Fluxer's hashed classes.
-  function makePluginCard({ id, icon, name, description, author, version, badge, enabled, onToggle, onRemove }) {
-    const card = document.createElement('div');
-    card.dataset.rxId = id;
-    card.style.cssText = [
-      'display:flex', 'align-items:center', 'gap:12px',
-      'padding:12px 0',
-      'border-bottom:1px solid var(--background-modifier-accent,rgba(255,255,255,0.06))',
-    ].join(';');
-
-    // Left: icon — use plugin-specific icon if available, else generic puzzle
-    const iconWrap = document.createElement('div');
-    iconWrap.style.cssText = [
-      'width:36px', 'height:36px', 'border-radius:8px', 'flex-shrink:0',
-      'background:var(--background-tertiary,#2b2d31)',
-      'display:flex', 'align-items:center', 'justify-content:center',
-      'color:var(--interactive-normal,#b9bbbe)',
-    ].join(';');
-    iconWrap.innerHTML = renderIcon(icon);
-
-    // Middle: text info
-    const info = document.createElement('div');
-    info.style.cssText = 'flex:1;min-width:0;';
-
-    const nameRow = document.createElement('div');
-    nameRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-bottom:2px;';
-    nameRow.innerHTML = `<span style="font-size:15px;font-weight:600;color:var(--text-normal,#dbdee1);">${esc(name)}</span>`;
-    if (badge) {
-      const badgeEl = document.createElement('span');
-      badgeEl.style.cssText = [
-        'font-size:10px', 'font-weight:700', 'padding:1px 5px',
-        'border-radius:3px', 'letter-spacing:.3px',
-        'background:var(--background-modifier-accent,rgba(255,255,255,0.1))',
-        'color:var(--text-muted,#949ba4)', 'text-transform:uppercase',
-      ].join(';');
-      badgeEl.textContent = badge;
-      nameRow.appendChild(badgeEl);
-    }
-    info.appendChild(nameRow);
-
-    const meta = [author ? `by ${author}` : '', version ? `v${version}` : ''].filter(Boolean).join(' · ');
-    if (meta) {
-      const metaEl = document.createElement('div');
-      metaEl.style.cssText = 'font-size:12px;color:var(--text-muted,#949ba4);margin-bottom:3px;';
-      metaEl.textContent = meta;
-      info.appendChild(metaEl);
-    }
-    if (description) {
-      const desc = document.createElement('div');
-      desc.style.cssText = 'font-size:13px;color:var(--text-muted,#949ba4);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;';
-      desc.textContent = description;
-      info.appendChild(desc);
-    }
-
-    // Right: toggle
-    const toggle = makeToggle(enabled, onToggle);
-
-    // Right: remove button (imported plugins only)
-    card.appendChild(iconWrap);
-    card.appendChild(info);
-    card.appendChild(toggle);
-    if (onRemove) {
-      const del = document.createElement('button');
-      del.type = 'button';
-      del.title = 'Remove plugin';
-      del.style.cssText = [
-        'background:none', 'border:none', 'cursor:pointer',
-        'padding:4px', 'border-radius:4px',
-        'color:var(--status-danger,#ed4245)', 'opacity:.6',
-        'display:flex', 'align-items:center', 'flex-shrink:0',
-        'transition:opacity 120ms, background 120ms',
-      ].join(';');
-      del.innerHTML = svgEl(SVG_TRASH, 16, 16);
-      del.addEventListener('mouseenter', () => { del.style.opacity = '1'; del.style.background = 'rgba(237,66,69,.1)'; });
-      del.addEventListener('mouseleave', () => { del.style.opacity = '.6'; del.style.background = 'none'; });
-      del.addEventListener('click', onRemove);
-      card.appendChild(del);
-    }
-
-    return card;
-  }
-
-  function makeToggle(initialChecked, onChange) {
-    let checked = initialChecked;
-    const TRACK_ON  = 'var(--brand-500,#5865f2)';
-    const TRACK_OFF = 'var(--background-modifier-accent,#4e5058)';
-
-    const track = document.createElement('button');
-    track.type = 'button';
-    track.setAttribute('role', 'switch');
-    track.setAttribute('aria-checked', String(checked));
-    track.style.cssText = [
-      'position:relative', 'width:40px', 'height:22px',
-      'border-radius:11px', 'border:none', 'cursor:pointer',
-      `background:${checked ? TRACK_ON : TRACK_OFF}`,
-      'transition:background 200ms', 'flex-shrink:0', 'padding:0',
-    ].join(';');
-
-    const thumb = document.createElement('span');
-    thumb.style.cssText = [
-      'position:absolute', 'top:3px',
-      `left:${checked ? '21px' : '3px'}`,
-      'width:16px', 'height:16px', 'border-radius:50%',
-      'background:#fff', 'transition:left 200ms',
-      'pointer-events:none',
-    ].join(';');
-    track.appendChild(thumb);
-
-    const applyState = (on) => {
-      checked = on;
-      track.setAttribute('aria-checked', String(on));
-      track.style.background = on ? TRACK_ON : TRACK_OFF;
-      thumb.style.left = on ? '21px' : '3px';
+  function createFluxtopTabResolver(nativeResolver, tabType, component) {
+    return function resolveSettingsTab(type, ...args) {
+      return type === tabType ? component : nativeResolver.call(this, type, ...args);
     };
-
-    track.addEventListener('click', async () => {
-      const next = !checked;
-      applyState(next);
-      track.disabled = true;
-      try { await onChange(next); } catch { applyState(!next); } finally { track.disabled = false; }
-    });
-
-    return track;
   }
-
-  // ─── Subsection builder ───────────────────────────────────────────────────
-  function makeSubsection(c, title, description) {
-    const sec = document.createElement('div');
-    sec.className = c.subsection;
-
-    const hdr = document.createElement('div');
-    hdr.className = c.subsectionHeader;
-    hdr.innerHTML = `<h4 class="${c.subsectionTitle}">${esc(title)}</h4>` +
-      (description ? `<p class="${c.subsectionDesc}">${esc(description)}</p>` : '');
-
-    const content = document.createElement('div');
-    content.className = c.subsectionContent;
-
-    sec.appendChild(hdr);
-    sec.appendChild(content);
-    return { sec, content };
+  function createFluxtopTabDescriptor(icon) {
+    return {type: 'fluxtop_plugins', category: 'fluxtop', label: 'Plugins', icon, iconWeight: 'regular'};
   }
-
-  // ─── Full page builder ────────────────────────────────────────────────────
-  async function buildPluginsPage(c) {
-    const page = document.createElement('div');
-    page.className = c.desktopContent;
-    page.setAttribute('role', 'tabpanel');
-    page.id = 'reflux-tabpanel-plugins';
-
-    page.innerHTML = `
-      <div class="${c.desktopContentPad}">
-        <div class="${c.desktopContentCard}">
-          <div class="${c.desktopHeader}" style="transition-duration:200ms;">
-            <div class="${c.titleContent}" style="opacity:1;">
-              <h1 class="${c.title}">Plugins</h1>
-            </div>
-          </div>
-          <div role="group" class="${c.scrollerWrap}">
-            <div class="${c.scroller}" dir="ltr" data-settings-scroll-container="true" style="overflow:hidden auto;">
-              <div class="${c.scrollerChildren}">
-                <div class="${c.spacerTop}"></div>
-                <div class="${c.scrollInner}">
-                  <div class="${c.tabContainer}" id="rx-tab-inner"></div>
-                </div>
-                <div class="${c.spacerBot}"></div>
-              </div>
-            </div>
-            <div class="${c.scrollTrack}" role="presentation" style="pointer-events:none;">
-              <div class="${c.scrollTrackThumb}" data-scroller-thumb="true" role="presentation" style="height:0"></div>
-            </div>
-          </div>
-        </div>
-      </div>
-    `;
-
-    const inner = page.querySelector('#rx-tab-inner');
-
-    // ── Installed Plugins subsection ─────────────────────────────────────
-    const { sec: instSec, content: instContent } = makeSubsection(
-      c, 'Installed Plugins',
-      'Toggle plugins on or off. Changes take effect immediately.',
-    );
-    inner.appendChild(instSec);
-
-    async function renderPlugins() {
-      instContent.innerHTML = '';
-
-      // Built-ins from main process
-      let builtins = [];
-      try {
-        builtins = (await window.refluxBridge?.listPlugins() ?? [])
-          .filter(p => p.name !== 'settingsUI');
-      } catch { /* ignore */ }
-
-      for (const p of builtins) {
-        const card = makePluginCard({
-          id:          'rx-' + p.name,
-          icon:        p.icon || null,
-          name:        p.displayName || p.name,
-          description: p.description || '',
-          badge:       'Built-in',
-          enabled:     p.enabled ?? true,
-          onToggle: async (on) => {
-            try {
-              if (on) await window.refluxBridge?.enablePlugin(p.name);
-              else    await window.refluxBridge?.disablePlugin(p.name);
-            } catch (e) { console.error(e); throw e; }
-          },
-        });
-        instContent.appendChild(card);
-      }
-
-      // Imported plugins
-      const imported = await getImported();
-      for (const p of imported) {
-        const card = makePluginCard({
-          id:          'rx-imp-' + p.id,
-          icon:        p.icon || null,
-          name:        p.name,
-          description: p.description || '',
-          author:      p.author || '',
-          version:     p.version || '',
-          badge:       'Imported',
-          enabled:     p.enabled !== false,
-          onToggle: async (on) => {
-            const all = await getImported();
-            const t = all.find(x => x.id === p.id);
-            if (t) { t.enabled = on; await saveImported(all); }
-          },
-          onRemove: async () => {
-            const all = await getImported();
-            const idx = all.findIndex(x => x.id === p.id);
-            if (idx !== -1) { all.splice(idx, 1); await saveImported(all); renderPlugins(); }
-          },
-        });
-        instContent.appendChild(card);
-      }
-
-      if (!instContent.hasChildNodes()) {
-        const empty = document.createElement('p');
-        empty.style.cssText = 'color:var(--text-muted,#949ba4);font-size:14px;margin:8px 0 0;';
-        empty.textContent = 'No plugins installed. Import a .js file below.';
-        instContent.appendChild(empty);
-      }
-    }
-
-    await renderPlugins();
-
-    // ── Import subsection ─────────────────────────────────────────────────
-    const { sec: impSec, content: impContent } = makeSubsection(
-      c, 'Import Plugin',
-      'Load a .js plugin file from your computer. The plugin runs immediately and on every future launch.',
-    );
-    inner.appendChild(impSec);
-
-    const fileInput = document.createElement('input');
-    fileInput.type = 'file';
-    fileInput.accept = '.js';
-    fileInput.style.display = 'none';
-    impContent.appendChild(fileInput);
-
-    const importBtn = document.createElement('button');
-    importBtn.type = 'button';
-    importBtn.style.cssText = [
-      'display:inline-flex', 'align-items:center', 'gap:8px',
-      'padding:8px 16px', 'border-radius:4px', 'border:none',
-      'cursor:pointer', 'font-size:14px', 'font-weight:500',
-      'background:var(--brand-500,#5865f2)', 'color:#fff',
-      'transition:filter 120ms',
-    ].join(';');
-    importBtn.innerHTML = svgEl(SVG_UPLOAD, 16, 16) + ' Import Plugin';
-    importBtn.addEventListener('mouseenter', () => importBtn.style.filter = 'brightness(1.1)');
-    importBtn.addEventListener('mouseleave', () => importBtn.style.filter = '');
-    importBtn.addEventListener('click', () => fileInput.click());
-    impContent.appendChild(importBtn);
-
-    fileInput.addEventListener('change', async (e) => {
-      const file = e.target.files[0];
-      if (!file) return;
-      const reader = new FileReader();
-      reader.onload = async (ev) => {
-        const source = ev.target.result;
-        const meta   = parseMetadata(source, file.name);
-        const plugin = { id: uid(), ...meta, enabled: true, source };
-        const all    = await getImported();
-        all.push(plugin);
-        await saveImported(all);
-        runPlugin(source);
-        await renderPlugins();
-      };
-      reader.readAsText(file);
-      fileInput.value = '';
-    });
-
-    return page;
-  }
-
-  // ─── Overlay management ───────────────────────────────────────────────────
-  let _ourPanel  = null;
-  let _realPanel = null;
-  let _cleanupFn = null;
-
-  async function showRefluxPanel(sc) {
-    // Discover structural classes; retry once if DOM not fully settled
-    let c = discoverClasses();
-    if (!c || !c.desktopContentPad) {
-      await new Promise(r => setTimeout(r, 200));
-      c = discoverClasses();
-      if (!c) return;
-    }
-    Object.assign(c, sc);
-
-    _realPanel = document.querySelector('[role="tabpanel"]');
-    if (!_realPanel) return;
-
-    // Remove any stale panel from a previous open
-    document.getElementById('reflux-tabpanel-plugins')?.remove();
-
-    _ourPanel = await buildPluginsPage(c);
-
-    _realPanel.insertAdjacentElement('afterend', _ourPanel);
-    _realPanel.style.display = 'none';
-
-    // Override sidebar highlight CSS
-    injectActiveStyle();
-
-    // Restore when any native Fluxer tab is clicked
-    if (_cleanupFn) _cleanupFn();
-    const handler = (e) => {
-      const tab = e.target.closest('[role="tab"]');
-      if (tab && tab.id !== 'reflux-tab-plugins') hideRefluxPanel();
+  function createFluxtopCategoryLabelResolver(nativeLabel) {
+    return function resolveCategoryLabel(category, ...args) {
+      return category === 'fluxtop' ? 'Fluxtop' : nativeLabel.call(this, category, ...args);
     };
-    document.addEventListener('click', handler, true);
-    _cleanupFn = () => document.removeEventListener('click', handler, true);
   }
-
-  function hideRefluxPanel() {
-    removeActiveStyle();
-    if (_realPanel)  { _realPanel.style.display = ''; _realPanel = null; }
-    if (_ourPanel)   { _ourPanel.remove(); _ourPanel = null; }
-    if (_cleanupFn)  { _cleanupFn(); _cleanupFn = null; }
-    document.getElementById('reflux-tab-plugins')?.setAttribute('aria-selected', 'false');
-    document.getElementById('reflux-tab-plugins')?.setAttribute('tabindex', '-1');
-  }
-
-  // ─── Sidebar injection ────────────────────────────────────────────────────
-  function findDeveloperSection() {
-    for (const s of document.querySelectorAll('[class*="sidebarCategory"]')) {
-      if (s.querySelector('h2')?.textContent.trim() === 'Developer') return s;
+  function findSettingsTabsExport(exports) {
+    for (const [key, value] of Object.entries(exports || {})) {
+      if (typeof value !== 'function') continue;
+      const source = Function.prototype.toString.call(value);
+      if (source.includes('.filter(') && source.includes('.map(') && source.includes('type:') &&
+          source.includes('category:') && source.includes('label:') && source.includes('iconWeight:')) return key;
     }
     return null;
   }
+  function findSettingsTabResolverExport(exports) {
+    for (const [key, value] of Object.entries(exports || {})) {
+      if (typeof value !== 'function') continue;
+      const source = Function.prototype.toString.call(value);
+      if (/return\s+null\s*!=\s*\(\s*([A-Za-z_$][\w$]*)\s*=\s*[A-Za-z_$][\w$]*\s*\[\s*[A-Za-z_$][\w$]*\s*\]\s*\)\s*\?\s*\1\s*:\s*null/.test(source)) return key;
+    }
+    return null;
+  }
+  function findSettingsCategoryLabelExport(exports) {
+    for (const [key, value] of Object.entries(exports || {})) {
+      if (typeof value !== 'function') continue;
+      const source = Function.prototype.toString.call(value);
+      if (source.includes('case"user_settings"') && source.includes('case"app_settings"') && source.includes('message:"App settings"')) return key;
+    }
+    return null;
+  }
+  function findSettingsDeepLinkExport(exports) {
+    for (const [key, value] of Object.entries(exports || {})) {
+      if (typeof value !== 'function') continue;
+      const source = Function.prototype.toString.call(value);
+      if (source.includes('searchParams.get') && source.includes('settings/user') &&
+          source.includes('pathname.replace') && source.includes('.has(')) return key;
+    }
+    return null;
+  }
+  function createFluxtopSettingsDeepLinkParser(nativeParser, tabType) {
+    return function parseSettingsDeepLink(url, ...args) {
+      try {
+        const parsed = new URL(url, 'https://fluxer.app');
+        const pathname = parsed.pathname.replace(/\/+$/, '') || '/';
+        const tab = parsed.searchParams.get('tab');
+        if (pathname === '/settings/user' && ['plugins', tabType].includes(tab)) return {tab: tabType};
+      } catch { /* let Fluxer's parser handle its own supported URL formats */ }
+      return nativeParser.call(this, url, ...args);
+    };
+  }
+  function isSettingsExportPatched(exports, key) {
+    return Boolean(exports?.[PATCH_MARKER]?.has?.(key));
+  }
+  function proxySettingsModuleExports(exports, key, transform, cache, gate) {
+    const patchedKeys = new Set(exports?.[PATCH_MARKER] || []);
+    if (patchedKeys.has(key)) return exports;
+    if (cache.has(exports)) return cache.get(exports);
+    const wrapped = new WeakMap();
+    patchedKeys.add(key);
+    const proxy = new Proxy(exports, {get(target, property, receiver) {
+      if (property === PATCH_MARKER) return patchedKeys;
+      const value = Reflect.get(target, property, receiver);
+      if (property !== key || typeof value !== 'function') return value;
+      if (!gate.active) return value;
+      if (!wrapped.has(value)) wrapped.set(value, transform(value));
+      return wrapped.get(value);
+    }});
+    cache.set(exports, proxy);
+    return proxy;
+  }
+  function findFluxerWebpackRequire(win) {
+    for (const name of Object.getOwnPropertyNames(win).filter((key) => /^(?:rspack|webpack)Chunk/.test(key))) {
+      const chunks = win[name];
+      if (!Array.isArray(chunks)) continue;
+      let req;
+      try { chunks.push([[`fluxtop-runtime-${Date.now()}-${Math.random()}`], {}, (runtime) => { req = runtime; }]); }
+      catch { continue; }
+      if (typeof req === 'function' && req.m) return req;
+    }
+    return null;
+  }
+  function findFluxerRuntime(req, predicate, validate = (exports) => Boolean(exports)) {
+    for (const [id, factory] of Object.entries(req?.m || {})) {
+      if (!predicate(getOriginalFactorySource(factory))) continue;
+      try {
+        const exports = req(id);
+        if (validate(exports)) return exports;
+      } catch { /* ignore non-runtime factories */ }
+    }
+    return null;
+  }
+  function getOriginalFactorySource(factory) {
+    return Function.prototype.toString.call(factory?.__fluxtopOriginalFactory || factory);
+  }
+  async function waitForSettingsRuntime(discover, delay, attempts = 60, intervalMs = 500) {
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      try {
+        const runtime = discover();
+        if (runtime?.jsx && runtime?.React?.useState && typeof runtime?.patcher?.patch === 'function') return runtime;
+      } catch { /* the Fluxer runtime may still be initializing */ }
+      if (attempt + 1 < attempts) await delay(intervalMs);
+    }
+    return null;
+  }
+  function createPluginsComponent(React, jsx) {
+    const h = (type, props, key) => jsx.jsx(type, {...props, ...(key === undefined ? {} : {key})});
+    const iconNode = (icon) => {
+      if (!icon) return h('svg', {viewBox: '0 0 48 48', style: styles.iconSvg, 'aria-hidden': true,
+        children: h('path', {d: SVG_PLUG})});
+      const text = String(icon).trim();
+      if (/^<svg/i.test(text)) {
+        const vector = parsePluginSvgIcon(text);
+        if (vector) return h('svg', {viewBox: vector.viewBox, width: vector.width || 22, height: vector.height || 22,
+          style: styles.iconSvg, 'aria-hidden': true, children: vector.paths.map((d, index) => h('path', {d}, `path:${index}`))});
+      }
+      if (/^(https?:|data:)/i.test(text)) return h('img', {src: text, alt: '', style: {width: 24, height: 24, objectFit: 'contain'}});
+      return h('span', {children: text});
+    };
+    function Toggle({checked, disabled, locked = false, onChange, label}) {
+      const visual = getSwitchVisualState(checked, locked || disabled);
+      return h('button', {type: 'button', role: 'switch', 'aria-label': `Toggle ${label}`,
+        'aria-checked': checked, 'data-state': checked ? 'checked' : 'unchecked', disabled, onClick: () => onChange(!checked),
+        style: {...styles.toggle, cursor: visual.cursor, opacity: visual.opacity, background: visual.trackColor,
+          boxShadow: visual.trackShadow, transition: visual.trackTransition},
+        children: h('span', {style: {...styles.thumb, color: visual.iconColor, transform: `translateX(${visual.thumbOffset}px)`, transition: visual.thumbTransition},
+          children: h('svg', {width: visual.iconSize, height: visual.iconSize, viewBox: '0 0 256 256', fill: 'currentColor', color: visual.iconColor, 'aria-hidden': true,
+            children: h('path', {d: visual.iconPath})})})});
+    }
+    function PluginRow({plugin, imported, onRefresh}) {
+      const [busy, setBusy] = React.useState(false);
+      const [pendingEnabled, setPendingEnabled] = React.useState(null);
+      const name = plugin.displayName || plugin.name;
+      const isFluxtop = plugin.disableable === false;
+      const toggle = async (enabled) => {
+        if (busy || plugin.disableable === false) return;
+        setBusy(true);
+        setPendingEnabled(enabled);
+        try {
+          if (imported) {
+            const list = await getImported();
+            const item = list.find((entry) => entry.id === plugin.id);
+            if (item) { item.enabled = enabled; await saveImported(list); }
+          } else if (enabled) await window.fluxtopBridge?.enablePlugin(plugin.name);
+          else await window.fluxtopBridge?.disablePlugin(plugin.name);
+          console.log(`[Fluxtop:SettingsUI] ${pluginToggleLog(name, enabled)}`);
+          await onRefresh();
+        } catch (error) {
+          console.error('[Fluxtop:SettingsUI] Plugin toggle failed:', error);
+        } finally {
+          setPendingEnabled(null);
+          setBusy(false);
+        }
+      };
+      const remove = async () => {
+        const list = await getImported();
+        await saveImported(removeImportedPluginById(list, plugin.id));
+        await onRefresh();
+      };
+      const meta = [plugin.author && `by ${plugin.author}`, plugin.version && `v${plugin.version}`].filter(Boolean).join(' · ');
+      return h('div', {style: isFluxtop ? {...styles.row, ...styles.fluxtopRow} : styles.row, children: [
+        h('div', {style: styles.icon, children: iconNode(plugin.icon)}, 'icon'),
+        h('div', {style: styles.info, children: [
+          h('div', {style: {display: 'flex', gap: 7, alignItems: 'center'}, children: [
+            h('strong', {style: styles.name, children: name}, 'name'),
+            h('span', {style: {fontSize: 10, textTransform: 'uppercase', color: 'var(--text-muted, #949ba4)'}, children: imported ? 'Imported' : 'Built-in'}, 'badge'),
+          ]}, 'nameRow'),
+          meta && h('p', {style: styles.meta, children: meta}, 'meta'),
+          plugin.description && h('p', {style: styles.description, children: plugin.description}, 'description'),
+        ]}, 'info'),
+        h(Toggle, {checked: pendingEnabled ?? (plugin.disableable === false || plugin.enabled !== false),
+          disabled: plugin.disableable === false, locked: plugin.disableable === false, label: name, onChange: toggle}, 'toggle'),
+        imported && h('button', {type: 'button', title: 'Remove plugin', 'aria-label': `Remove ${name}`,
+          style: styles.remove, onClick: remove, children: '×'}, 'remove'),
+      ]});
+    }
+    return function FluxtopPluginsSettings() {
+      const [builtins, setBuiltins] = React.useState([]);
+      const [imported, setImported] = React.useState([]);
+      const [error, setError] = React.useState('');
+      const [busy, setBusy] = React.useState(false);
+      const refresh = React.useCallback(async () => {
+        try {
+          const [plugins, saved] = await Promise.all([
+            window.fluxtopBridge?.listPlugins() ?? [], getImported(),
+          ]);
+          setBuiltins(plugins);
+          setImported(saved);
+          setError('');
+        } catch (failure) { setError(failure?.message || 'Could not load plugins.'); }
+      }, []);
+      React.useEffect(() => { void refresh(); }, [refresh]);
+      const onFile = async (event) => {
+        const file = event.target.files?.[0];
+        event.target.value = '';
+        if (!file) return;
+        setBusy(true);
+        try {
+          const source = await file.text();
+          const plugin = {id: uid(), ...parseMetadata(source, file.name), enabled: true, source};
+          const all = await getImported();
+          all.push(plugin);
+          await saveImported(all);
+          runPlugin(source);
+          await refresh();
+        } catch (failure) { setError(failure?.message || 'Could not import plugin.'); }
+        finally { setBusy(false); }
+      };
+      const section = (title, description, children, key) => h('section', {style: styles.section, children: [
+        h('h2', {style: styles.sectionTitle, children: title}, 'title'),
+        h('p', {style: styles.hint, children: description}, 'hint'),
+        children,
+      ]}, key);
+      const rows = createPluginViewModel(builtins, imported).map(({plugin, imported: isImported}) =>
+        h(PluginRow, {plugin, imported: isImported, onRefresh: refresh}, `${isImported ? 'imported' : 'builtin'}:${plugin.id || plugin.name}`));
+      return h('div', {'data-flx': 'fluxtop.react-settings-tab.plugins', style: styles.root, children: [
+        h('header', {style: styles.header, children: [
+          h('h1', {style: styles.title, children: 'Plugins'}, 'heading'),
+        ]}, 'header'),
+        error && h('p', {role: 'alert', children: error}, 'error'),
+        section('Installed Plugins', 'Toggle plugins on or off. Changes take effect immediately.',
+          rows.length ? rows : h('p', {style: styles.hint, children: 'No plugins installed. Import a .js file below.'}), 'installed'),
+        section('Import Plugin', 'Load a .js plugin file from your computer. The plugin runs immediately and on every future launch.',
+          h('label', {style: {...styles.button, opacity: busy ? .6 : 1}, children: [
+            h('svg', {width: '1rem', height: '1rem', viewBox: '0 0 256 256', fill: 'currentColor', 'aria-hidden': true,
+              children: h('path', {d: 'M228,128a12,12,0,0,1-12,12H140v76a12,12,0,0,1-24,0V140H40a12,12,0,0,1,0-24h76V40a12,12,0,0,1,24,0v76h76A12,12,0,0,1,228,128Z'})}),
+            'Import Plugin', h('input', {type: 'file', accept: '.js', disabled: busy, onChange: onFile,
+              style: {position: 'absolute', width: 1, height: 1, overflow: 'hidden', clip: 'rect(0,0,0,0)'}}),
+          ]}), 'import'),
+      ]});
+    };
+  }
 
-  function buildSidebarSection(sc) {
-    const section = document.createElement('section');
-    section.id = 'reflux-sidebar-section';
-    section.className = sc.cat;
-    section.setAttribute('aria-labelledby', 'reflux-sidebar-heading');
-
-    const h2 = document.createElement('h2');
-    h2.id = 'reflux-sidebar-heading';
-    h2.className = sc.catTitle;
-    h2.textContent = 'Reflux';
-    section.appendChild(h2);
-
-    const btn = document.createElement('button');
-    btn.id = 'reflux-tab-plugins';
-    btn.type = 'button';
-    btn.className = sc.item;
-    btn.setAttribute('role', 'tab');
-    btn.setAttribute('aria-selected', 'false');
-    btn.setAttribute('tabindex', '-1');
-
-    const iconWrap = document.createElement('span');
-    iconWrap.innerHTML = svgEl(SVG_PLUG);
-    const svgE = iconWrap.firstElementChild;
-    if (svgE) svgE.setAttribute('class', sc.itemIcon);
-
-    const ver = window.refluxBridge?.version;
-
-    const labelSpan = document.createElement('span');
-    labelSpan.className = sc.itemLabel;
-    labelSpan.innerHTML = `<div class="${sc.tabLabel}"><span>Plugins</span></div>`;
-
-    btn.appendChild(svgE || iconWrap);
-    btn.appendChild(labelSpan);
-
-    const verSpan = document.createElement('span');
-    verSpan.id = 'reflux-version-badge';
-    verSpan.textContent = `Reflux${ver ? ` (${ver})` : ''}`;
-    verSpan.style.cssText = [
-      'font-size:10px', 'font-weight:600',
-      'color:var(--text-muted,#949ba4)',
-      'padding:1px 5px', 'border-radius:3px',
-      'background:var(--background-tertiary,#2b2d31)',
-      'white-space:nowrap', 'flex-shrink:0',
-    ].join(';');
-    btn.appendChild(verSpan);
-
-    btn.addEventListener('click', async () => {
-      btn.setAttribute('aria-selected', 'true');
-      btn.setAttribute('tabindex', '0');
-      await showRefluxPanel(sc);
+  function findFluxerCopyUtility(win) {
+    const req = findFluxerWebpackRequire(win);
+    const id = Object.entries(req?.m || {}).find(([, factory]) => {
+      const source = getOriginalFactorySource(factory);
+      return source.includes('Copying text to clipboard') && source.includes('Copied to clipboard') && /copy:function\(\)\{return/.test(source);
+    })?.[0];
+    try { return id === undefined ? null : req(id)?.copy || null; }
+    catch { return null; }
+  }
+  function findSettingsI18n(button) {
+    const fiberKey = Object.keys(button || {}).find((key) => key.startsWith('__reactFiber$'));
+    for (let fiber = fiberKey ? button[fiberKey] : null; fiber; fiber = fiber.return) {
+      for (let context = fiber.dependencies?.firstContext; context; context = context.next) {
+        const value = context.memoizedValue;
+        if (typeof value?._ === 'function') return value;
+      }
+    }
+    return null;
+  }
+  function findFluxerComponentBus(req) {
+    const id = Object.entries(req?.m || {}).find(([, factory]) => {
+      return isFluxerComponentBusFactory(getOriginalFactorySource(factory));
+    })?.[0];
+    try {
+      const exports = id === undefined ? null : req(id);
+      return Object.values(exports || {}).find((value) => typeof value?.dispatch === 'function') || null;
+    } catch { return null; }
+  }
+  function isFluxerComponentBusFactory(source) {
+    return source.includes('dispatchOrBuffer') && source.includes('ComponentBus');
+  }
+  function dispatchPluginsTab(componentBus) {
+    componentBus?.dispatch?.('USER_SETTINGS_TAB_SELECT', {tab: 'fluxtop_plugins'});
+  }
+  function waitForSettingsPanelAndSelectPlugins(componentBus, doc = document, selectTab = dispatchPluginsTab) {
+    if (doc.querySelector('[aria-label="Settings sections"]')) {
+      selectTab(componentBus);
+      return Promise.resolve(true);
+    }
+    return new Promise((resolve) => {
+      const observer = new MutationObserver(() => {
+        if (!doc.querySelector('[aria-label="Settings sections"]')) return;
+        observer.disconnect();
+        clearTimeout(timeout);
+        selectTab(componentBus);
+        resolve(true);
+      });
+      const timeout = setTimeout(() => {
+        observer.disconnect();
+        resolve(false);
+      }, 10000);
+      observer.observe(doc.body, {childList: true, subtree: true});
     });
-
-    section.appendChild(btn);
-    return section;
   }
-
-  function inject(devSection) {
-    if (document.getElementById('reflux-sidebar-section')) return;
-    const sc = discoverSidebarClasses(devSection);
-    devSection.parentNode.insertBefore(buildSidebarSection(sc), devSection);
-    console.log('[Reflux:SettingsUI] Sidebar injected.');
+  async function copyPluginsSettingsLink(copyText, translator, url) {
+    const result = await copyText(translator, url || PLUGINS_URL, false);
+    if (result === false) throw new Error('Fluxer could not copy the Plugins settings link');
+    return result;
   }
-
-  // ─── MutationObserver ─────────────────────────────────────────────────────
-  let _timer = null;
-  function tryInject() {
-    const dev = findDeveloperSection();
-    if (dev) inject(dev);
+  async function openPluginsFromSettingsLink(componentBus) {
+    if (!document.querySelector('[aria-label="Settings sections"]')) {
+      const button = Array.from(document.querySelectorAll('button')).find((item) =>
+        /^(user settings|configurações do usuário)$/i.test(item.getAttribute('aria-label') || ''));
+      button?.click();
+      await new Promise((resolve) => {
+        const observer = new MutationObserver(() => {
+          if (document.querySelector('[aria-label="Settings sections"]')) { observer.disconnect(); resolve(); }
+        });
+        observer.observe(document.body, {childList: true, subtree: true});
+        setTimeout(() => { observer.disconnect(); resolve(); }, 5000);
+      });
+    }
+    dispatchPluginsTab(componentBus);
   }
-
-  tryInject();
-
-  const observer = new MutationObserver(() => {
-    if (_timer) return;
-    _timer = setTimeout(() => { _timer = null; tryInject(); }, 100);
-  });
-  observer.observe(document.body, { childList: true, subtree: true });
-
-  // ─── Lifecycle ────────────────────────────────────────────────────────────
-  window.__reflux?.pluginManager?.register?.({
-    name: 'settingsUI',
-    start() {},
-    stop() {
+  function isPluginsSettingsUrl(parsed) {
+    return parsed.protocol === 'fluxer:' && parsed.hostname === 'settings' &&
+      (parsed.pathname === '/plugins' || (parsed.pathname === '/user' && ['plugins', 'fluxtop_plugins'].includes(parsed.searchParams.get('tab'))));
+  }
+  function decoratePluginsSettingsLinks(root, componentBus) {
+    const anchors = [];
+    if (root?.matches?.('a[href]')) anchors.push(root);
+    anchors.push(...(root?.querySelectorAll?.('a[href]') || []));
+    for (const anchor of anchors) {
+      let parsed;
+      try { parsed = new URL(anchor.href); } catch { continue; }
+      if (!isPluginsSettingsUrl(parsed)) continue;
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.setAttribute('aria-label', 'Open Plugins in settings');
+      button.setAttribute('aria-roledescription', 'settings link');
+      button.setAttribute('data-flx$', 'tab-name');
+      button.style.cssText = 'appearance:none;display:inline-flex;align-items:center;gap:4px;border:0;border-radius:4px;padding:1px 6px;background:var(--background-modifier-accent,rgba(255,255,255,.08));color:var(--text-link);font:inherit;font-weight:600;cursor:pointer;vertical-align:baseline';
+      const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+       icon.setAttribute('viewBox', '0 0 48 48'); icon.setAttribute('width', '14'); icon.setAttribute('height', '14'); icon.setAttribute('aria-hidden', 'true');
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path'); path.setAttribute('d', SVG_PLUG); path.setAttribute('fill', 'currentColor');
+      icon.appendChild(path); button.append(icon, document.createTextNode('Plugins'));
+      button.addEventListener('click', (event) => {
+        event.preventDefault();
+        void openPluginsFromSettingsLink(componentBus);
+      });
+      anchor.replaceWith(button);
+    }
+  }
+  function handleNativePluginsCopy(event, root = document) {
+    const button = event.target?.closest?.('[data-flx="app.settings-heading-link-button.button.copy"]');
+    if (!button || !root.querySelector('[data-flx="fluxtop.react-settings-tab.plugins"]')) return false;
+    const copyText = findFluxerCopyUtility(window);
+    const translator = findSettingsI18n(button);
+    if (!copyText || !translator) return false;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    void copyPluginsSettingsLink(copyText, translator, PLUGINS_URL).catch((error) => console.error('[Fluxtop:SettingsUI] Could not copy Plugins link:', error));
+    return true;
+  }
+  function syncVersion(version) {
+    if (!version) return;
+    const clientInfo = document.querySelector('[data-flx="app.client-info.button.click"]');
+    if (!clientInfo) return;
+    let label = clientInfo.querySelector('[data-fluxtop-version]');
+    if (!label) { label = document.createElement('span'); label.dataset.fluxtopVersion = 'true'; clientInfo.appendChild(label); }
+    const nextLabel = formatFluxtopVersion(version);
+    if (shouldUpdateVersionLabel(label.textContent, version)) label.textContent = nextLabel;
+  }
+  function shouldUpdateVersionLabel(current, version) {
+    return current !== `Fluxtop ${version}`;
+  }
+  function formatFluxtopVersion(version) {
+    return `Fluxtop ${version}`;
+  }
+  function createSettingsUICleanup(observer, linkObserver, unpatch, win, gate, copyHandler, deepLinkHandler, doc) {
+    return () => {
       observer.disconnect();
-      clearTimeout(_timer);
-      hideRefluxPanel();
-      document.getElementById('reflux-sidebar-section')?.remove();
-      removeActiveStyle();
-      window.__reflux_settingsUI_loaded = false;
-    },
-  });
+      linkObserver.disconnect();
+      if (copyHandler) doc?.removeEventListener('click', copyHandler, true);
+      if (deepLinkHandler) win.removeEventListener('fluxtop:open-plugins-settings', deepLinkHandler);
+      gate.active = false;
+      for (const undo of unpatch) undo();
+      delete win.__fluxtopReactSettingsTabStatus;
+      win.__fluxtop_settingsUI_loaded = false;
+    };
+  }
 
-  console.log('[Reflux:SettingsUI] Ready.');
+  async function installSettingsUI() {
+  const runtime = await waitForSettingsRuntime(() => {
+    const patcher = window.__fluxtop?.patcher;
+    if (typeof patcher?.patch !== 'function') return null;
+    const req = findFluxerWebpackRequire(window);
+    if (!req) return null;
+    const jsx = findFluxerRuntime(req, (source) => source.includes('react.transitional.element') && /\.jsx\s*=/.test(source) && /\.jsxs\s*=/.test(source));
+    const React = findFluxerRuntime(req, (source) => source.includes('react.transitional.element') && source.includes('react.memo') && source.includes('react.context'),
+      (exports) => typeof exports?.useState === 'function' && typeof exports?.useEffect === 'function');
+    return jsx && React ? {req, jsx, React, patcher} : null;
+  }, (ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  if (!runtime) {
+    console.error('[Fluxtop:SettingsUI] React settings module discovery timed out; Plugins tab was not installed.');
+    window.__fluxtop_settingsUI_loaded = false;
+    return;
+  }
+  const {req, jsx, React, patcher} = runtime;
+  const Component = createPluginsComponent(React, jsx);
+  const componentBus = findFluxerComponentBus(req);
+  const FluxtopIcon = ({size = 20}) => jsx.jsx('svg', {viewBox: '0 0 48 48', width: size, height: size,
+    fill: 'currentColor', 'aria-hidden': true, children: jsx.jsx('path', {d: SVG_PLUG})});
+  const tabDescriptor = createFluxtopTabDescriptor(FluxtopIcon);
+  const catalogCache = new WeakMap();
+  const resolverCache = new WeakMap();
+  const categoryCache = new WeakMap();
+  const deepLinkCache = new WeakMap();
+  const patchesActive = {active: false};
+  let catalogPatched = false;
+  let resolverPatched = false;
+  const setPatchActivation = () => { patchesActive.active = catalogPatched && resolverPatched; };
+  const unpatch = [
+    patcher.patch((exports) => Boolean(findSettingsTabsExport(exports)) && !isSettingsExportPatched(exports, findSettingsTabsExport(exports)), (exports) => {
+      const key = findSettingsTabsExport(exports);
+      catalogPatched = true;
+      setPatchActivation();
+      return proxySettingsModuleExports(exports, key, (native) => function (...args) {
+        const tabs = native.apply(this, args);
+        return patchesActive.active ? appendFluxtopSettingsTab(tabs, tabDescriptor) : tabs;
+      }, catalogCache, patchesActive);
+    }),
+    patcher.patch((exports) => Boolean(findSettingsTabResolverExport(exports)) && !isSettingsExportPatched(exports, findSettingsTabResolverExport(exports)), (exports) => {
+      const key = findSettingsTabResolverExport(exports);
+      resolverPatched = true;
+      setPatchActivation();
+      return proxySettingsModuleExports(exports, key, (native) => createFluxtopTabResolver(native, TAB_TYPE, Component), resolverCache, patchesActive);
+    }),
+    patcher.patch((exports) => Boolean(findSettingsCategoryLabelExport(exports)) && !isSettingsExportPatched(exports, findSettingsCategoryLabelExport(exports)), (exports) => {
+      const key = findSettingsCategoryLabelExport(exports);
+      return proxySettingsModuleExports(exports, key, (native) => createFluxtopCategoryLabelResolver(native), categoryCache, {active: true});
+    }),
+    patcher.patch((exports) => Boolean(findSettingsDeepLinkExport(exports)) && !isSettingsExportPatched(exports, findSettingsDeepLinkExport(exports)), (exports) => {
+      const key = findSettingsDeepLinkExport(exports);
+      return proxySettingsModuleExports(exports, key, (native) => createFluxtopSettingsDeepLinkParser(native, TAB_TYPE), deepLinkCache, {active: true});
+    }),
+  ];
+  window.__fluxtopReactSettingsTabStatus = () => ({catalogPatched, resolverPatched});
+
+  const importedAtStartup = getImported().then((list) => list.filter((plugin) => plugin.enabled !== false).forEach((plugin) => runPlugin(plugin.source)));
+  const manager = {
+    name: 'settingsUI',
+    start() {
+      syncVersion(window.fluxtopBridge?.version);
+      const observer = new MutationObserver(() => syncVersion(window.fluxtopBridge?.version));
+      observer.observe(document.body, {childList: true, subtree: true});
+      decoratePluginsSettingsLinks(document, componentBus);
+      document.addEventListener('click', handleNativePluginsCopy, true);
+      const handlePluginsDeepLink = () => {
+        if (!window.__fluxtopPendingPluginsDeepLink) return;
+        delete window.__fluxtopPendingPluginsDeepLink;
+        void waitForSettingsPanelAndSelectPlugins(componentBus);
+      };
+      window.addEventListener('fluxtop:open-plugins-settings', handlePluginsDeepLink);
+      handlePluginsDeepLink();
+      const linkObserver = new MutationObserver((mutations) => {
+        for (const mutation of mutations) for (const node of mutation.addedNodes) {
+          if (node.nodeType === Node.ELEMENT_NODE) decoratePluginsSettingsLinks(node, componentBus);
+        }
+      });
+      linkObserver.observe(document.body, {childList: true, subtree: true});
+      return createSettingsUICleanup(observer, linkObserver, unpatch, window, patchesActive, handleNativePluginsCopy, handlePluginsDeepLink, document);
+    },
+  };
+  window.__fluxtop?.pluginManager?.register?.(manager);
+  importedAtStartup.catch((error) => console.error('[Fluxtop:SettingsUI] Imported plugin startup failed:', error));
+  console.log('[Fluxtop:SettingsUI] React Plugins settings tab registered.');
+  }
+  void installSettingsUI().catch((error) => {
+    console.error('[Fluxtop:SettingsUI] Plugin initialization failed:', error);
+    window.__fluxtop_settingsUI_loaded = false;
+  });
 })();

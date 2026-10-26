@@ -1,120 +1,91 @@
 /**
- * installer/unpatch.js
+ * installer/cli/unpatch.js
  *
- * Restores Fluxer's original app.asar from the backup created by index.js,
- * removes the Reflux injection line from the unpacked preload file, and deletes
- * the backup so the system is back to its pristine state.
+ * Restores the selected Fluxer app.asar from a marker-verified Fluxtop backup.
  *
- * Run with: node installer/unpatch.js
- * Override: FLUXER_ASAR=C:\...\app.asar node installer/unpatch.js
+ * Run with: node installer/cli/unpatch.js
+ * Override: FLUXER_ASAR=C:\...\app.asar node installer/cli/unpatch.js
  */
 
 'use strict';
 
 const path = require('path');
 const fs   = require('fs');
+const {createInterface} = require('node:readline/promises');
+const {
+  FLUXTOP_MARKER,
+  chooseInstance,
+  discoverInstances,
+  normalizeAsarPath,
+  readMainEntry,
+} = require('../lib/instances.js');
 
 // ---------------------------------------------------------------------------
 // Helpers — mirrors the search logic in index.js
 // ---------------------------------------------------------------------------
 
-// When compiled with pkg, __dirname is a virtual snapshot path.
-const _BASE = process.pkg ? path.dirname(process.execPath) : path.resolve(__dirname, '..');
-const REFLUX_ROOT    = path.resolve(_BASE, '..');
-const REFLUX_PRELOAD = path.join(REFLUX_ROOT, 'src', 'preload.js');
-
-const LOCALAPPDATA = process.env.LOCALAPPDATA || path.join(process.env.USERPROFILE || 'C:\\Users\\Default', 'AppData', 'Local');
-
-const PRODUCT_DIRS = [
-  path.join(LOCALAPPDATA, 'fluxer_app'),         // standard install (confirmed)
-  path.join(LOCALAPPDATA, 'fluxer_app_canary'),  // canary variant (assumed)
-  path.join(LOCALAPPDATA, 'Fluxer'),             // legacy / alternative name
-  path.join(LOCALAPPDATA, 'Fluxer Canary'),
-  path.join('C:\\', 'Program Files', 'Fluxer', 'resources'),
-  path.join('C:\\', 'Program Files (x86)', 'Fluxer', 'resources'),
-];
-
-const ASAR_PRELOAD_ENTRY = 'src-electron/dist/preload/index.js';
-
-function findLatestResourcesDir(productDir) {
-  if (!fs.existsSync(productDir)) return null;
-  const appDirs = fs.readdirSync(productDir, { withFileTypes: true })
-    .filter(e => e.isDirectory() && e.name.startsWith('app-'))
-    .map(e => e.name)
-    .sort()
-    .reverse();
-  for (const dir of appDirs) {
-    const resources = path.join(productDir, dir, 'resources');
-    const bak = path.join(resources, 'app.asar.bak');
-    if (fs.existsSync(bak)) return resources;
-  }
-  return null;
+function promptForInstance(instances) {
+  const rl = createInterface({input: process.stdin, output: process.stdout});
+  console.log('Fluxtop installations found:');
+  instances.forEach((instance, index) => console.log(`  ${index + 1}) ${instance.label} — ${instance.asarPath}`));
+  return rl.question('Select an instance number: ').finally(() => rl.close());
 }
 
-function findResourcesDir() {
-  if (process.env.FLUXER_ASAR) return path.dirname(process.env.FLUXER_ASAR);
-  for (const dir of PRODUCT_DIRS) {
-    if (fs.existsSync(path.join(dir, 'app.asar.bak'))) return dir;
-    const resources = findLatestResourcesDir(dir);
-    if (resources) return resources;
+async function findResourcesDir() {
+  if (process.env.FLUXER_ASAR) {
+    return normalizeAsarPath(process.env.FLUXER_ASAR, path).resourcesDir;
   }
-  throw new Error(
-    'Could not find app.asar.bak — Reflux may not be installed.\n' +
-    'Searched:\n' + PRODUCT_DIRS.map(d => '  ' + d).join('\n')
-  );
+  const instances = discoverInstances({purpose: 'uninstall'});
+  return (await chooseInstance(instances, {
+    env: process.env,
+    stdin: process.stdin,
+    stdout: process.stdout,
+    prompt: promptForInstance,
+  })).resourcesDir;
 }
 
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
-function main() {
-  const resourcesDir = findResourcesDir();
+async function main() {
+  const resourcesDir = await findResourcesDir();
   const asarPath     = path.join(resourcesDir, 'app.asar');
   const bakPath      = asarPath + '.bak';
-  const unpackedDir  = asarPath + '.unpacked';
 
-  console.log(`[Reflux] Resources dir: ${resourcesDir}`);
+  console.log(`[Fluxtop] Resources dir: ${resourcesDir}`);
 
   // ── Step 1: Restore original asar ───────────────────────────────────────
-  if (!fs.existsSync(bakPath)) {
-    console.error('[Reflux] Backup not found. Cannot restore.');
-    process.exit(1);
+  if (!fs.existsSync(asarPath)) throw new Error(`Fluxer archive not found: ${asarPath}`);
+  if (!fs.existsSync(bakPath)) throw new Error('Fluxtop backup not found. Cannot restore.');
+  if (!readMainEntry(asarPath).includes(FLUXTOP_MARKER)) {
+    throw new Error('Active archive is not marked as a Fluxtop install; refusing to restore its backup.');
+  }
+  try {
+    fs.accessSync(resourcesDir, fs.constants.W_OK);
+    fs.accessSync(asarPath, fs.constants.W_OK);
+  } catch {
+    throw new Error(`No write permission for selected Fluxer instance: ${asarPath}`);
   }
   fs.copyFileSync(bakPath, asarPath);
-  console.log(`[Reflux] Restored original asar from: ${bakPath}`);
+  console.log(`[Fluxtop] Restored original asar from: ${bakPath}`);
 
   fs.unlinkSync(bakPath);
-  console.log('[Reflux] Backup removed.');
+  console.log('[Fluxtop] Backup removed.');
 
-  // ── Step 2: Ensure unpacked preload is clean ────────────────────────────
-  // Reflux no longer patches the preload file (uses session.setPreloads instead),
-  // but clean up any remnant from an older install just in case.
-  const unpackedPreload = path.join(unpackedDir, ASAR_PRELOAD_ENTRY);
-  if (fs.existsSync(unpackedPreload)) {
-    const oldInjectLine = `require(${JSON.stringify(REFLUX_PRELOAD.replace(/\\/g, '/'))});\n`;
-    const contents = fs.readFileSync(unpackedPreload, 'utf8');
-    if (contents.startsWith(oldInjectLine)) {
-      fs.writeFileSync(unpackedPreload, contents.slice(oldInjectLine.length), 'utf8');
-      console.log('[Reflux] Removed legacy preload injection line.');
-    }
-  }
-
-  // ── Step 3: Clean up any leftover temp directories ──────────────────────
-  for (const suffix of ['.reflux-tmp', '.reflux-full-extract']) {
+  // ── Step 2: Clean up Fluxtop's own temporary directories ────────────────
+  for (const suffix of ['.fluxtop-tmp', '.fluxtop-full-extract']) {
     const tmpDir = path.join(resourcesDir, suffix);
     if (fs.existsSync(tmpDir)) {
       fs.rmSync(tmpDir, { recursive: true });
-      console.log(`[Reflux] Removed temp dir: ${tmpDir}`);
+      console.log(`[Fluxtop] Removed temp dir: ${tmpDir}`);
     }
   }
 
-  console.log('\n[Reflux] Unpatched successfully. Restart Fluxer to apply.');
+  console.log('\n[Fluxtop] Uninstalled successfully. Restart Fluxer to apply.');
 }
 
-try {
-  main();
-} catch (err) {
-  console.error('[Reflux] Unpatch failed:', err.message);
+main().catch((err) => {
+  console.error('[Fluxtop] Uninstall failed:', err.message);
   process.exit(1);
-}
+});

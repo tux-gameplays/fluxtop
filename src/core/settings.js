@@ -1,8 +1,8 @@
 /**
  * src/core/settings.js
  *
- * Persistent settings for Reflux.
- * Reads/writes %APPDATA%\Reflux\settings.json.
+ * Persistent settings for Fluxtop.
+ * Uses %APPDATA%/Fluxtop on Windows and XDG_CONFIG_HOME/fluxtop on Linux.
  *
  * Used directly from the main process (src/main-inject.mjs) and exposed to
  * the renderer via IPC (the ipcMain handlers are registered here).
@@ -19,16 +19,27 @@
 
 const fs   = require('node:fs');
 const path = require('node:path');
+const {migrateLegacySettings} = require('./settings-migration.js');
 
 // ---------------------------------------------------------------------------
 // Storage path
 // ---------------------------------------------------------------------------
 
-const APPDATA = process.env.APPDATA
-  || path.join(process.env.USERPROFILE || require('node:os').homedir(), 'AppData', 'Roaming');
-
-const SETTINGS_DIR  = path.join(APPDATA, 'Reflux');
+const HOME = require('node:os').homedir();
+const LEGACY_APPDATA = process.env.APPDATA
+  || path.join(process.env.USERPROFILE || HOME, 'AppData', 'Roaming');
+const SETTINGS_DIR = process.platform === 'win32'
+  ? path.join(process.env.APPDATA || path.join(process.env.USERPROFILE || HOME, 'AppData', 'Roaming'), 'Fluxtop')
+  : path.join(process.env.XDG_CONFIG_HOME || path.join(HOME, '.config'), 'fluxtop');
 const SETTINGS_FILE = path.join(SETTINGS_DIR, 'settings.json');
+const CONFIG_DIR = process.platform === 'win32'
+  ? path.dirname(SETTINGS_DIR)
+  : (process.env.XDG_CONFIG_HOME || path.join(HOME, '.config'));
+const LEGACY_SETTINGS_FILES = [...new Set([
+  path.join(LEGACY_APPDATA, 'Reflux', 'settings.json'),
+  path.join(CONFIG_DIR, 'Reflux', 'settings.json'),
+])];
+const LEGACY_SETTINGS_FILE = LEGACY_SETTINGS_FILES[0];
 
 // ---------------------------------------------------------------------------
 // In-memory cache
@@ -40,11 +51,13 @@ let _cache = null;
 function _load() {
   if (_cache !== null) return;
   try {
+    const legacyFile = LEGACY_SETTINGS_FILES.find((candidate) => fs.existsSync(candidate)) || LEGACY_SETTINGS_FILE;
+    migrateLegacySettings({legacyFile, fluxtopFile: SETTINGS_FILE});
     _cache = fs.existsSync(SETTINGS_FILE)
       ? JSON.parse(fs.readFileSync(SETTINGS_FILE, 'utf8'))
       : {};
   } catch (err) {
-    console.error('[Reflux:Settings] Load failed, starting fresh:', err.message);
+    console.error('[Fluxtop:Settings] Load failed, starting fresh:', err.message);
     _cache = {};
   }
 }
@@ -54,7 +67,7 @@ function _save() {
     if (!fs.existsSync(SETTINGS_DIR)) fs.mkdirSync(SETTINGS_DIR, { recursive: true });
     fs.writeFileSync(SETTINGS_FILE, JSON.stringify(_cache, null, 2), 'utf8');
   } catch (err) {
-    console.error('[Reflux:Settings] Save failed:', err.message);
+    console.error('[Fluxtop:Settings] Save failed:', err.message);
   }
 }
 
@@ -108,7 +121,7 @@ function get(key, defaultValue = undefined) {
 function set(key, value) {
   _load();
   const { parent, key: lastKey } = _traverse(_cache, key, true);
-  if (!parent) { console.error('[Reflux:Settings] Invalid key:', key); return; }
+  if (!parent) { console.error('[Fluxtop:Settings] Invalid key:', key); return; }
   parent[lastKey] = value;
   _save();
 }
@@ -135,14 +148,14 @@ function getAll() {
 // ---------------------------------------------------------------------------
 
 const CH = {
-  GET_SETTING:    'reflux:get-setting',
-  SET_SETTING:    'reflux:set-setting',
-  GET_ALL:        'reflux:get-all-settings',
+  GET_SETTING:    'fluxtop:get-setting',
+  SET_SETTING:    'fluxtop:set-setting',
+  GET_ALL:        'fluxtop:get-all-settings',
 };
 
 /**
  * Register ipcMain handlers so the renderer can read/write settings via
- * the refluxBridge exposed in src/preload.js.
+ * the fluxtopBridge exposed in src/preload.js.
  *
  * @param {Electron.IpcMain} ipcMain
  */
@@ -152,4 +165,4 @@ function registerIpc(ipcMain) {
   ipcMain.handle(CH.GET_ALL,     ()                          => getAll());
 }
 
-module.exports = { get, set, remove, getAll, registerIpc, SETTINGS_FILE };
+module.exports = { get, set, remove, getAll, registerIpc, SETTINGS_FILE, LEGACY_SETTINGS_FILE, LEGACY_SETTINGS_FILES };

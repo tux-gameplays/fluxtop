@@ -1,15 +1,15 @@
-# Writing Plugins for Reflux
+# Writing Plugins for Fluxtop
 
-Reflux plugins have two sides: a **main-process side** (Node.js) and an optional **renderer side** (browser/web context). You only need what your plugin actually uses.
+Fluxtop plugins have two sides: a **main-process side** (Node.js) and an optional **renderer side** (browser/web context). You only need what your plugin actually uses.
 
 ---
 
 ## Quick start
 
-There are two ways to write a Reflux plugin depending on what you want to do:
+There are two ways to write a Fluxtop plugin depending on what you want to do:
 
-- **Contributing to Reflux** — clone the repo and add your plugin under `src/plugins/<your-plugin-name>/`. It will be discovered automatically on the next Fluxer launch.
-- **Personal use / sharing** — write a standalone `.js` file and import it via **Reflux Settings → Plugins → Import Plugin**. You don't need to clone the repo at all. See [Importable plugins](#importable-plugins-js-files) below.
+- **Contributing to Fluxtop** — clone the repo and add your plugin under `src/plugins/<your-plugin-name>/`. It will be discovered automatically on the next Fluxer launch.
+- **Personal use / sharing** — write a standalone `.js` file and import it via **Fluxtop Settings → Plugins → Import Plugin**. You don't need to clone the repo at all. See [Importable plugins](#importable-plugins-js-files) below.
 
 The rest of this section covers the built-in plugin format. For the importable format, skip to [Importable plugins](#importable-plugins-js-files).
 
@@ -22,7 +22,7 @@ Create a folder under `src/plugins/<your-plugin-name>/` and add `index.js`:
 
 module.exports = {
   name:        'myPlugin',       // unique ID — used as the settings key
-  displayName: 'My Plugin',      // shown in the Reflux settings UI
+  displayName: 'My Plugin',      // shown in the Fluxtop settings UI
   description: 'One-line description shown in the plugin list.',
   rendererSrc: null,             // path to renderer script, or null
   start() {},
@@ -30,7 +30,7 @@ module.exports = {
 };
 ```
 
-That's it. Reflux discovers and loads it automatically on the next Fluxer launch.
+That's it. Fluxtop discovers and loads it automatically on the next Fluxer launch.
 
 ---
 
@@ -43,7 +43,7 @@ That's it. Reflux discovers and loads it automatically on the next Fluxer launch
 | `description` | `string` | | Short description shown in the plugin card. |
 | `rendererSrc` | `string \| null` | | Absolute path to a renderer-side script injected into the Fluxer web context. |
 | `start()` | `function` | ✅ | Called when the plugin is enabled. |
-| `stop()` | `function` | ✅ | Called when the plugin is disabled or Reflux unloads. |
+| `stop()` | `function` | ✅ | Called when the plugin is disabled or Fluxtop unloads. |
 
 ---
 
@@ -82,7 +82,7 @@ module.exports = {
 
 ## Renderer side
 
-If your plugin needs to interact with the Fluxer web UI, set `rendererSrc` to the path of a JavaScript file. Reflux injects it into the web context via `executeJavaScript` after the page loads.
+If your plugin needs to interact with the Fluxer web UI, set `rendererSrc` to the path of a JavaScript file. Fluxtop injects it into the web context via `executeJavaScript` after the page loads.
 
 ```js
 // src/plugins/myPlugin/index.js
@@ -111,8 +111,8 @@ module.exports = {
   banner.textContent = 'My Plugin is active!';
   document.body.appendChild(banner);
 
-  // Register with Reflux so stop() can clean up
-  window.__reflux?.pluginManager?.register?.({
+  // Register with Fluxtop so stop() can clean up
+  window.__fluxtop?.pluginManager?.register?.({
     name: 'myPlugin',
     start() {},
     stop() {
@@ -129,17 +129,17 @@ module.exports = {
 
 ## Accessing settings from the renderer
 
-The `refluxBridge` object is exposed by Reflux's preload script and is available in the renderer as `window.refluxBridge`.
+The `fluxtopBridge` object is exposed by Fluxtop's preload script and is available in the renderer as `window.fluxtopBridge`.
 
 ```js
 // Read a value (async)
-const volume = await window.refluxBridge.getSetting('myPlugin.volume', 100);
+const volume = await window.fluxtopBridge.getSetting('myPlugin.volume', 100);
 
 // Write a value (async)
-await window.refluxBridge.setSetting('myPlugin.volume', 80);
+await window.fluxtopBridge.setSetting('myPlugin.volume', 80);
 ```
 
-Settings are stored in `%APPDATA%\Reflux\settings.json` under your plugin's key namespace.
+Settings are stored in `%APPDATA%\Fluxtop\settings.json` under your plugin's key namespace.
 
 ---
 
@@ -165,7 +165,7 @@ Fluxer decompresses its zstd-stream WebSocket frames and calls `JSON.parse()` on
     }
   }
 
-  window.__reflux?.pluginManager?.register?.({
+  window.__fluxtop?.pluginManager?.register?.({
     name: 'myPlugin',
     start() {},
     stop() {
@@ -179,16 +179,16 @@ Fluxer decompresses its zstd-stream WebSocket frames and calls `JSON.parse()` on
 
 ## Importable plugins (`.js` files)
 
-Users can import external `.js` plugins directly from the Reflux settings UI without touching the file system. Add a metadata block at the top of your file:
+Users can import external `.js` plugins directly from the Fluxtop settings UI without touching the file system. Add a metadata block at the top of your file:
 
 ```js
-// ==RefluxPlugin==
+// ==FluxtopPlugin==
 // @name        My Plugin
 // @author      3rr0r
 // @description Does something cool
 // @version     1.0.0
 // @icon        🔌
-// ==/RefluxPlugin==
+// ==/FluxtopPlugin==
 
 (function myPlugin() {
   // Your plugin code here
@@ -222,29 +222,29 @@ The `@icon` field accepts three formats:
 // @icon        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path fill="#ef4444" d="M12 2L2 7l10 5 10-5-10-5z"/></svg>
 ```
 
-Reflux renders whatever string is in `@icon` as the `src` of an `<img>` tag, falling back to displaying it as text if the image fails to load — so emojis and SVGs both work.
+Fluxtop renders whatever string is in `@icon` as the `src` of an `<img>` tag, falling back to displaying it as text if the image fails to load — so emojis and SVGs both work.
 
-The user imports it via **Reflux Settings → Plugins → Import Plugin**.
+The user imports it via **Fluxtop Settings → Plugins → Import Plugin**.
 
 ---
 
 ## Full example — Delete Logger
 
-Logs a message to the console whenever someone deletes a message. This is an importable plugin — save it as `deleteLogger.js` and import it via **Reflux Settings → Plugins → Import Plugin**.
+Logs a message to the console whenever someone deletes a message. This is an importable plugin — save it as `deleteLogger.js` and import it via **Fluxtop Settings → Plugins → Import Plugin**.
 
 ```js
 // deleteLogger.js
-// ==RefluxPlugin==
+// ==FluxtopPlugin==
 // @name        Delete Logger
 // @author      3rr0r
 // @description Logs deleted messages to the console.
 // @version     1.0.0
 // @icon        🗑️
-// ==/RefluxPlugin==
+// ==/FluxtopPlugin==
 
 (function deleteLogger() {
-  if (window.__reflux_deleteLogger_loaded) return;
-  window.__reflux_deleteLogger_loaded = true;
+  if (window.__fluxtop_deleteLogger_loaded) return;
+  window.__fluxtop_deleteLogger_loaded = true;
 
   const _origParse = JSON.parse;
 
@@ -258,12 +258,12 @@ Logs a message to the console whenever someone deletes a message. This is an imp
     return result;
   };
 
-  window.__reflux?.pluginManager?.register?.({
+  window.__fluxtop?.pluginManager?.register?.({
     name: 'deleteLogger',
     start() {},
     stop() {
       JSON.parse = _origParse;
-      window.__reflux_deleteLogger_loaded = false;
+      window.__fluxtop_deleteLogger_loaded = false;
     },
   });
 })();

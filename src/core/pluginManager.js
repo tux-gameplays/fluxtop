@@ -8,7 +8,7 @@
  * list, enable, and disable plugins at runtime.
  *
  * Note: renderer-side plugins register themselves via
- * `window.__reflux.pluginManager.register()` inside renderer.js / renderer
+ * `window.__fluxtop.pluginManager.register()` inside renderer.js / renderer
  * plugin bundles.  This manager handles the *main-process* side only:
  * persisting enabled state and telling the renderer which plugins to activate.
  *
@@ -18,7 +18,7 @@
  *     description: string
  *     rendererSrc: string|null     — path to the renderer-side plugin JS to inject (or null)
  *     start():     void            — called when plugin enabled (main-process side)
- *     stop():      void            — called when plugin disabled / Reflux unloads
+ *     stop():      void            — called when plugin disabled / Fluxtop unloads
  *   }
  *
  * Per-plugin enabled state: `plugins.<name>.enabled` (default: true).
@@ -40,9 +40,9 @@ const _registry = new Map();
 const PLUGINS_DIR = path.resolve(__dirname, '..', 'plugins');
 
 const IPC_CH = {
-  LIST:    'reflux:plugin-list',
-  ENABLE:  'reflux:plugin-enable',
-  DISABLE: 'reflux:plugin-disable',
+  LIST:    'fluxtop:plugin-list',
+  ENABLE:  'fluxtop:plugin-enable',
+  DISABLE: 'fluxtop:plugin-disable',
 };
 
 // ---------------------------------------------------------------------------
@@ -50,7 +50,12 @@ const IPC_CH = {
 // ---------------------------------------------------------------------------
 
 function _isEnabled(name) {
+  if (!isPluginDisableable(_registry.get(name)?.module)) return true;
   return settings.get(`plugins.${name}.enabled`, true);
+}
+
+function isPluginDisableable(plugin) {
+  return plugin?.disableable !== false;
 }
 
 /**
@@ -63,14 +68,14 @@ function _loadPlugin(pluginDir) {
 
   let plugin;
   try { plugin = require(indexPath); }
-  catch (err) { console.error(`[Reflux:PluginManager] require("${indexPath}") failed:`, err); return null; }
+  catch (err) { console.error(`[Fluxtop:PluginManager] require("${indexPath}") failed:`, err); return null; }
 
   if (typeof plugin.name !== 'string' || !plugin.name) {
-    console.error(`[Reflux:PluginManager] Plugin at "${pluginDir}" missing valid "name".`);
+    console.error(`[Fluxtop:PluginManager] Plugin at "${pluginDir}" missing valid "name".`);
     return null;
   }
   if (typeof plugin.start !== 'function' || typeof plugin.stop !== 'function') {
-    console.error(`[Reflux:PluginManager] "${plugin.name}" must export start() and stop().`);
+    console.error(`[Fluxtop:PluginManager] "${plugin.name}" must export start() and stop().`);
     return null;
   }
   return plugin;
@@ -85,7 +90,7 @@ function _loadPlugin(pluginDir) {
  */
 function loadAll() {
   if (!fs.existsSync(PLUGINS_DIR)) {
-    console.warn('[Reflux:PluginManager] plugins dir not found:', PLUGINS_DIR);
+    console.warn('[Fluxtop:PluginManager] plugins dir not found:', PLUGINS_DIR);
     return;
   }
 
@@ -97,7 +102,7 @@ function loadAll() {
 
     const { name } = plugin;
     if (_registry.has(name)) {
-      console.warn(`[Reflux:PluginManager] Duplicate plugin name "${name}" — skipping.`);
+      console.warn(`[Fluxtop:PluginManager] Duplicate plugin name "${name}" — skipping.`);
       continue;
     }
 
@@ -106,7 +111,7 @@ function loadAll() {
     if (_isEnabled(name)) {
       startPlugin(name);
     } else {
-      console.log(`[Reflux:PluginManager] "${name}" disabled — skipping.`);
+      console.log(`[Fluxtop:PluginManager] "${name}" disabled — skipping.`);
     }
   }
 }
@@ -117,26 +122,27 @@ function startPlugin(name) {
   try {
     entry.module.start();
     entry.started = true;
-    console.log(`[Reflux:PluginManager] Started "${name}".`);
+    console.log(`[Fluxtop:PluginManager] Started "${name}".`);
   } catch (err) {
-    console.error(`[Reflux:PluginManager] "${name}".start() threw:`, err);
+    console.error(`[Fluxtop:PluginManager] "${name}".start() threw:`, err);
   }
 }
 
-function stopPlugin(name) {
+function stopPlugin(name, force = false) {
   const entry = _registry.get(name);
+  if (!force && !isPluginDisableable(entry?.module)) return;
   if (!entry || !entry.started) return;
   try {
     entry.module.stop();
     entry.started = false;
-    console.log(`[Reflux:PluginManager] Stopped "${name}".`);
+    console.log(`[Fluxtop:PluginManager] Stopped "${name}".`);
   } catch (err) {
-    console.error(`[Reflux:PluginManager] "${name}".stop() threw:`, err);
+    console.error(`[Fluxtop:PluginManager] "${name}".stop() threw:`, err);
   }
 }
 
 function stopAll() {
-  for (const name of _registry.keys()) stopPlugin(name);
+  for (const name of _registry.keys()) stopPlugin(name, true);
 }
 
 function enablePlugin(name) {
@@ -145,8 +151,15 @@ function enablePlugin(name) {
 }
 
 function disablePlugin(name) {
+  const entry = _registry.get(name);
+  if (!isPluginDisableable(entry?.module)) {
+    settings.set(`plugins.${name}.enabled`, true);
+    startPlugin(name);
+    return false;
+  }
   settings.set(`plugins.${name}.enabled`, false);
   stopPlugin(name);
+  return true;
 }
 
 function list() {
@@ -156,6 +169,7 @@ function list() {
     description:  entry.module.description || '',
     icon:         entry.module.icon         || null,
     rendererSrc:  entry.module.rendererSrc  || null,
+    disableable: isPluginDisableable(entry.module),
     started:      entry.started,
     enabled:      _isEnabled(name),
   }));
@@ -178,15 +192,15 @@ function registerIpc(ipcMain, { onRendererEnable, onRendererDisable } = {}) {
     const entry = _registry.get(name);
     if (onRendererEnable && entry?.module.rendererSrc) {
       await onRendererEnable(entry.module).catch(err =>
-        console.error(`[Reflux:PluginManager] onRendererEnable("${name}") threw:`, err));
+        console.error(`[Fluxtop:PluginManager] onRendererEnable("${name}") threw:`, err));
     }
   });
 
   ipcMain.handle(IPC_CH.DISABLE, async (_e, name) => {
-    disablePlugin(name);
+    if (!disablePlugin(name)) return;
     if (onRendererDisable) {
       await onRendererDisable(name).catch(err =>
-        console.error(`[Reflux:PluginManager] onRendererDisable("${name}") threw:`, err));
+        console.error(`[Fluxtop:PluginManager] onRendererDisable("${name}") threw:`, err));
     }
   });
 }

@@ -1,9 +1,9 @@
 <p align="center">
-  <img src=".github/assets/text_logo.png" alt="Reflux"/>
+  <img src=".github/assets/fluxtop-text-logo.svg" alt="Fluxtop"/>
 </p>
 
 <p align="center">
-  Reflux is a Vencord-style runtime injector for the Fluxer desktop app.
+  Fluxtop is a Vencord-style runtime injector based on <a href="https://github.com/Its3rr0rsWRLD/Reflux">Its3rr0rsWRLD's Reflux</a> for the <a href="https://github.com/fluxerapp/fluxer">Fluxer</a> desktop app.
 </p>
 
 <h3 align="center">
@@ -17,40 +17,44 @@
 - Plugin lifecycle (`start`, `stop`, enable/disable with persistent state)
 - `contextBridge` IPC bridge exposing settings and plugin management to the renderer
 - Gateway WebSocket interception (`wss://gateway.fluxer.app`) for event hooks
-- Injected **Reflux** section inside Fluxer's native settings panel
-- Import custom `.js` plugins at runtime with `==RefluxPlugin==` metadata blocks
-- Settings persisted to `%APPDATA%\Reflux\settings.json`
+- Injected **Fluxtop** section inside Fluxer's native settings panel
+- Import custom `.js` plugins at runtime with `==FluxtopPlugin==` metadata blocks
+- Settings persisted to `%APPDATA%\Fluxtop\settings.json` on Windows or `${XDG_CONFIG_HOME:-~/.config}/fluxtop/settings.json` on Linux
 
 <h2 align="center">Bundled plugins</h2>
 
 | Plugin | Description |
 |---|---|
-| **Settings UI** | Adds a "Reflux" sidebar section to Fluxer settings with plugin toggles and import |
+| **Settings UI** | Adds a "Fluxtop" sidebar section to Fluxer settings with plugin toggles and import |
 | **Message Logger** | Intercepts `MESSAGE_DELETE` gateway events and re-displays deleted messages inline |
 
 <h2 align="center">Install</h2>
 
 ```bash
-cd installer
-npm install
-node index.js
+# Run from the repository root
+npm --prefix installer install
+npm --prefix installer run gui
+# Or if you prefer
+npm --prefix installer run cli
 ```
 
-Reflux auto-detects the latest Fluxer version under `%LOCALAPPDATA%\fluxer_app\`.
+The GUI detects Fluxer Stable and Canary installations on Windows and Linux. When multiple installations are found, select the one Fluxtop should manage. Linux discovery checks `/opt`, `/usr/lib`, `~/.local/opt`, and `~/.local/share` (including `~/.local/share/Fluxer-Canary`) for native/extracted installs.
 
 Override the target manually:
 
 ```bash
-FLUXER_ASAR=C:\Users\<USERNAME>\AppData\Local\fluxer_app\app-0.0.8\resources\app.asar node installer/index.js
+FLUXER_ASAR="/path/to/Fluxer/resources/app.asar" npm --prefix installer run cli
 ```
+
+The GUI also accepts either an `app.asar` file or its containing `resources` directory. CLI use requires `FLUXER_ASAR` when more than one instance is detected. The selected archive and `resources` directory must be writable by the current user; Fluxtop does not elevate privileges. Fluxer AppImage and Flatpak installs are not supported.
 
 <h2 align="center">Uninstall</h2>
 
 ```bash
-node installer/unpatch.js
+node installer/cli/unpatch.js
 ```
 
-Restores `app.asar` from `app.asar.bak` and removes all injected lines from the unpacked preload.
+Restores `app.asar` from the Fluxtop backup after verifying the active archive's marker.
 
 <h2 align="center">Writing a plugin</h2>
 
@@ -67,36 +71,36 @@ module.exports = {
 };
 ```
 
-The optional `rendererSrc` file is injected into Fluxer's web context via `executeJavaScript` after the core bootstrap runs. Use `window.__reflux` and `window.refluxBridge` inside it.
+The optional `rendererSrc` file is injected into Fluxer's web context via `executeJavaScript` after the core bootstrap runs. Use `window.__fluxtop` and `window.fluxtopBridge` inside it.
 
 <h3 align="center">Importable plugins (`.js` files)</h3>
 
 Drop a `.js` file into the Plugins → Import panel in Fluxer settings. Optionally include a metadata block at the top:
 
 ```js
-// ==RefluxPlugin==
+// ==FluxtopPlugin==
 // @name        My Plugin
 // @author      3rr0r
 // @description Does cool stuff
 // @version     1.0.0
 // @preview     https://i.imgur.com/example.png
-// ==/RefluxPlugin==
+// ==/FluxtopPlugin==
 ```
 
 <h2 align="center">Repo layout</h2>
 
 ```
-installer/          Injector script (standalone, own package.json + deps)
-  index.js          Inject Reflux into Fluxer
-  unpatch.js        Remove Reflux from Fluxer
+installer/          Fluxtop installer (GUI and standalone CLI)
+  cli/index.js      Install Fluxtop into the selected Fluxer instance
+  cli/unpatch.js    Remove Fluxtop from the selected instance
 src/
   main-inject.mjs   ESM module injected into Fluxer's main process
-  preload.js        Sandboxed preload — exposes refluxBridge via contextBridge
+  preload.js        Sandboxed preload — exposes fluxtopBridge via contextBridge
   renderer.js       Core bootstrap injected into the web renderer
   core/
-    settings.js     Read/write %APPDATA%\Reflux\settings.json, IPC handlers
+    settings.js     Read/write platform-specific Fluxtop settings, IPC handlers
     pluginManager.js  Discover, start/stop plugins, IPC handlers
-    patcher.js      Thin wrapper around window.__reflux.patcher
+    patcher.js      Thin wrapper around window.__fluxtop.patcher
   plugins/
     settingsUI/     Settings panel injected into Fluxer's native settings UI
     messageLogger/  Deleted message logger via gateway WebSocket interception
@@ -106,12 +110,12 @@ src/
 
 - `resources/app.asar` — `await import(...)` line prepended to `src-electron/dist/main/index.js`
   - backup: `app.asar.bak`
-- `resources/app.asar.unpacked/src-electron/dist/preload/index.js` — no longer patched directly; Reflux preload is registered via `session.setPreloads()` instead
+- The selected main entry is identified from the archive's `package.json` and its supported Fluxer main-entry layouts.
 
-Settings are stored at `%APPDATA%\Reflux\settings.json`.
+Settings are stored under `%APPDATA%\Fluxtop\settings.json` on Windows or `$XDG_CONFIG_HOME/fluxtop/settings.json` (default `~/.config/fluxtop/settings.json`) on Linux. Data from earlier products is not imported.
 
 <h2 align="center">Default install path</h2>
 
 - Windows: `%LOCALAPPDATA%\fluxer_app\app-<version>\resources\`
 - Canary: `%LOCALAPPDATA%\Fluxer Canary\app-<version>\resources\`
-
+- Linux: `/opt/Fluxer/resources/`, `/usr/lib/fluxer/resources/`, `~/.local/opt/Fluxer/resources/`, or `~/.local/share/fluxer/resources/` (and Canary equivalents)
